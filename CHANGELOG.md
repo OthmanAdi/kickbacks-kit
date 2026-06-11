@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2]
+
+### Fixed
+* Advertiser names now parse creatives that use a hyphen or dash separator
+  (for example "Solo - run your agents"), not just the middot, and fall back to
+  the click host only when no short brand head is present.
+* The advertiser label is refreshed when an ad is seen again, so earlier rows
+  heal to the better name on the next rotation.
+
 ## [0.1.1]
 
 ### Added

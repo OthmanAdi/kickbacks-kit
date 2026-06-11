@@ -127,6 +127,7 @@ impl Archive {
                  ON CONFLICT(id) DO UPDATE SET
                      last_seen_ms = excluded.last_seen_ms,
                      times_seen   = times_seen + 1,
+                     advertiser   = excluded.advertiser,
                      ad_text      = excluded.ad_text,
                      click_url    = excluded.click_url,
                      icon_url     = excluded.icon_url",

@@ -39,14 +39,18 @@ impl CliAd {
         s
     }
 
-    /// Best-effort advertiser name. The extension's creatives follow the
-    /// pattern "Advertiser · tagline" (middot separator), so we take the part
-    /// before the first middot; otherwise fall back to the click_url host.
+    /// Best-effort advertiser name. Creatives follow the pattern
+    /// "Advertiser <sep> tagline", where the separator is a middot, an em or en
+    /// dash, or a spaced hyphen. We take the head when it looks like a name (a
+    /// few words at most); otherwise we fall back to the click_url host.
     pub fn advertiser(&self) -> String {
-        if let Some((head, _)) = self.ad_text.split_once(" · ") {
-            let head = head.trim();
-            if !head.is_empty() {
-                return head.to_string();
+        const SEPARATORS: [&str; 4] = [" · ", " — ", " – ", " - "];
+        for sep in SEPARATORS {
+            if let Some((head, _)) = self.ad_text.split_once(sep) {
+                let head = head.trim();
+                if !head.is_empty() && head.split_whitespace().count() <= 4 {
+                    return head.to_string();
+                }
             }
         }
         if let Some(url) = &self.click_url {
@@ -81,5 +85,82 @@ pub fn host_of(url: &str) -> Option<String> {
         None
     } else {
         Some(host.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ad(text: &str, url: Option<&str>) -> CliAd {
+        CliAd {
+            ad_text: text.to_string(),
+            click_url: url.map(str::to_string),
+            icon_url: None,
+            icon_ref: None,
+            ts: 0,
+        }
+    }
+
+    #[test]
+    fn advertiser_from_middot() {
+        assert_eq!(
+            ad(
+                "Tailscale · the VPN that disappears",
+                Some("https://tailscale.com/")
+            )
+            .advertiser(),
+            "Tailscale"
+        );
+    }
+
+    #[test]
+    fn advertiser_from_hyphen() {
+        assert_eq!(
+            ad(
+                "Solo - a better place to run your agents",
+                Some("https://soloterm.com/")
+            )
+            .advertiser(),
+            "Solo"
+        );
+    }
+
+    #[test]
+    fn advertiser_falls_back_to_host_for_long_head() {
+        // No short brand head -> use the host instead of a sentence fragment.
+        assert_eq!(
+            ad(
+                "this is a long sentence - with a dash",
+                Some("https://example.com/x")
+            )
+            .advertiser(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn advertiser_unknown_without_url() {
+        assert_eq!(ad("just some text", None).advertiser(), "unknown");
+    }
+
+    #[test]
+    fn id_is_stable_and_text_sensitive() {
+        let a = ad("Solo - run agents", Some("https://soloterm.com/"));
+        let b = ad("Solo - run agents", Some("https://soloterm.com/"));
+        let c = ad("Solo - different copy", Some("https://soloterm.com/"));
+        assert_eq!(a.id(), b.id());
+        assert_ne!(a.id(), c.id());
+        assert_eq!(a.id().len(), 16);
+    }
+
+    #[test]
+    fn host_parsing() {
+        assert_eq!(
+            host_of("https://www.tailscale.com/path?x=1"),
+            Some("tailscale.com".into())
+        );
+        assert_eq!(host_of("http://linear.app"), Some("linear.app".into()));
+        assert_eq!(host_of("not a url"), Some("not a url".into()));
     }
 }
