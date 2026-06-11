@@ -14,6 +14,9 @@ mod model;
 mod paths;
 mod setup;
 mod sources;
+/// Test-only: renders a buffer to SVG for the README hero image.
+#[cfg(test)]
+mod svg;
 mod top;
 mod util;
 mod watch;
@@ -42,7 +45,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Live TUI dashboard (captures while open)
-    Top,
+    Top {
+        /// Render with sample data instead of your archive (no capture, no writes)
+        #[arg(long)]
+        demo: bool,
+    },
     /// Headless capture daemon: poll local artifacts into the archive
     Watch {
         /// Seconds between polls
@@ -91,7 +98,13 @@ enum ArchiveCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Top => top::run(),
+        Command::Top { demo } => {
+            if demo {
+                top::run_demo()
+            } else {
+                top::run()
+            }
+        }
         Command::Watch { interval, once } => watch::run(interval, once),
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),

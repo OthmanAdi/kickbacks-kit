@@ -45,6 +45,7 @@ struct App {
     recent: Vec<AdRow>,
     live: LiveState,
     current: Option<crate::model::CliAd>,
+    demo: bool,
 }
 
 impl App {
@@ -68,6 +69,139 @@ pub fn run() -> Result<()> {
     let result = run_loop(&mut terminal, &mut archive);
     ratatui::restore();
     result
+}
+
+/// Render the dashboard with built-in sample data, so the layout can be seen
+/// without waiting for real ads. Touches no archive and writes nothing.
+pub fn run_demo() -> Result<()> {
+    let app = demo_app();
+    let mut terminal = ratatui::init();
+    let result = (|| -> Result<()> {
+        loop {
+            terminal.draw(|frame| ui(frame, &app))?;
+            if event::poll(Duration::from_millis(200))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        let ctrl_c = key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                        if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) || ctrl_c {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    ratatui::restore();
+    result
+}
+
+/// Representative sample data for `--demo` and the README screenshot. Clearly
+/// labelled "demo data" in the header so it is never mistaken for real earnings.
+fn demo_app() -> App {
+    let advertiser = |name: &str, ads: i64, seen: i64| AdvertiserStat {
+        advertiser: name.to_string(),
+        distinct_ads: ads,
+        sightings: seen,
+    };
+    let recent = |adv: &str, text: &str, url: &str, ago_ms: i64| AdRow {
+        id: adv.to_string(),
+        advertiser: adv.to_string(),
+        ad_text: text.to_string(),
+        click_url: Some(url.to_string()),
+        first_seen_ms: 1_780_000_000_000,
+        last_seen_ms: 1_781_210_000_000 - ago_ms,
+        times_seen: 1,
+    };
+    App {
+        now_ms: 1_781_210_000_000,
+        stats: Stats {
+            distinct_ads: 42,
+            advertisers: 17,
+            total_sightings: 128,
+            sightings_today: 12,
+            sightings_week: 63,
+            first_seen_ms: Some(1_780_640_040_000),
+            last_seen_ms: Some(1_781_209_988_000),
+        },
+        sparkline: vec![
+            1, 2, 1, 3, 4, 6, 5, 7, 6, 8, 6, 9, 7, 5, 4, 6, 8, 7, 5, 3, 4, 6, 5, 2,
+        ],
+        leaderboard: vec![
+            advertiser("Tailscale", 4, 23),
+            advertiser("Linear", 3, 19),
+            advertiser("Vercel", 5, 17),
+            advertiser("Neon", 2, 14),
+            advertiser("Sentry", 3, 12),
+            advertiser("Supabase", 2, 11),
+            advertiser("Fly.io", 1, 9),
+            advertiser("Cloudflare", 2, 8),
+        ],
+        recent: vec![
+            recent(
+                "Tailscale",
+                "Tailscale · the VPN that disappears",
+                "https://tailscale.com/",
+                12_000,
+            ),
+            recent(
+                "Linear",
+                "Linear · issues you actually close",
+                "https://linear.app/",
+                9 * 60_000,
+            ),
+            recent(
+                "Vercel",
+                "Vercel · ship in seconds",
+                "https://vercel.com/",
+                21 * 60_000,
+            ),
+            recent(
+                "Neon",
+                "Neon · Postgres that scales to zero",
+                "https://neon.tech/",
+                38 * 60_000,
+            ),
+            recent(
+                "Sentry",
+                "Sentry · catch errors before users do",
+                "https://sentry.io/",
+                52 * 60_000,
+            ),
+            recent(
+                "Supabase",
+                "Supabase · the open source Firebase",
+                "https://supabase.com/",
+                70 * 60_000,
+            ),
+            recent(
+                "Fly.io",
+                "Fly.io · run your app close to users",
+                "https://fly.io/",
+                95 * 60_000,
+            ),
+            recent(
+                "Cloudflare",
+                "Cloudflare · the network is the computer",
+                "https://cloudflare.com/",
+                120 * 60_000,
+            ),
+        ],
+        live: LiveState {
+            signed_in: Some(true),
+            injection_on: Some(true),
+            ..Default::default()
+        },
+        current: Some(crate::model::CliAd {
+            ad_text: "Tailscale · the VPN that disappears".to_string(),
+            click_url: Some("https://tailscale.com/".to_string()),
+            icon_url: None,
+            icon_ref: None,
+            ts: 1_781_209_988_000,
+        }),
+        demo: true,
+    }
 }
 
 fn run_loop(terminal: &mut DefaultTerminal, archive: &mut Archive) -> Result<()> {
@@ -114,7 +248,7 @@ fn ui(frame: &mut Frame, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(FRAME))
         .padding(Padding::new(1, 1, 0, 0))
-        .title_top(brand_title())
+        .title_top(brand_title(app.demo))
         .title_top(status_chips(&app.live).right_aligned())
         .title_bottom(keybinds_line())
         .title_bottom(ethic_line().right_aligned());
@@ -130,8 +264,8 @@ fn ui(frame: &mut Frame, app: &App) {
     render_right(frame, columns[1], app);
 }
 
-fn brand_title() -> Line<'static> {
-    Line::from(vec![
+fn brand_title(demo: bool) -> Line<'static> {
+    let mut spans = vec![
         Span::styled(
             " kickbacks",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
@@ -141,7 +275,14 @@ fn brand_title() -> Line<'static> {
             Style::default().fg(FG).add_modifier(Modifier::BOLD),
         ),
         Span::styled("· kbtop ", Style::default().fg(DIM)),
-    ])
+    ];
+    if demo {
+        spans.push(Span::styled(
+            "· demo data ",
+            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn status_chips(live: &LiveState) -> Line<'static> {
@@ -448,10 +589,33 @@ mod tests {
                 icon_ref: None,
                 ts: 1_781_210_399_000,
             }),
+            demo: false,
         };
         let out = rendered(&app);
         assert!(out.contains("Tailscale"));
         assert!(out.contains("TOP ADVERTISERS"));
         assert!(out.contains("signed in"));
+    }
+
+    #[test]
+    fn demo_app_renders() {
+        let out = rendered(&demo_app());
+        assert!(out.contains("Tailscale"));
+        assert!(out.contains("demo data"));
+        assert!(out.contains("TOP ADVERTISERS"));
+    }
+
+    /// Not a test: a generator for the README hero image. Run explicitly with
+    /// `cargo test --release -- --ignored generate_readme_svg`. Writes
+    /// `media/kbtop.svg` from the demo dashboard.
+    #[test]
+    #[ignore = "asset generator, run manually"]
+    fn generate_readme_svg() {
+        let backend = TestBackend::new(86, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &demo_app())).unwrap();
+        let svg = crate::svg::buffer_to_svg(terminal.backend().buffer());
+        std::fs::create_dir_all("media").unwrap();
+        std::fs::write("media/kbtop.svg", svg).unwrap();
     }
 }

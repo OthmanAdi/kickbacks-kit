@@ -15,3 +15,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * `kb setup` and `kb doctor` helpers for first run and diagnostics.
 * SQLite archive with idempotent ad capture keyed by rotation timestamp.
 * Read-only by design: no billing event is ever emitted.
+* `kb top --demo`: render the dashboard with sample data, labelled "demo data",
+  touching no archive and writing nothing.
+* README hero image of the dashboard, generated as a standalone SVG from the
+  demo render by an ignored asset test (`generate_readme_svg`).

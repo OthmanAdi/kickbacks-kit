@@ -5,9 +5,15 @@
 **A read-only companion for the [kickbacks.ai](https://kickbacks.ai) extension.**
 Archive every ad you are shown, and watch your stats in a live terminal dashboard.
 
+Track the sponsored ads kickbacks.ai shows in your Claude Code and Codex spinner:
+a local ad archive plus a Rust TUI dashboard for impressions, advertisers, and earnings history.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-13%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-14%20passing-brightgreen.svg)](#testing)
+[![Read only](https://img.shields.io/badge/read--only-never%20bills-success.svg)](#what-this-is-and-is-not)
+
+<img src="media/kbtop.svg" alt="kickbacks-kit kbtop terminal dashboard for kickbacks.ai showing the current ad, total ads seen, a 24 hour sightings sparkline, the advertiser leaderboard, and recent ads in Claude Code" width="820">
 
 </div>
 
@@ -21,25 +27,8 @@ ad lives in one file, and earnings sit in memory until the next API poll.
 files the extension already writes, records every ad into a small SQLite archive,
 and renders the whole picture in a terminal UI. Nothing leaves your machine.
 
-```
-╭ kickbacks-kit · kbtop                              ● signed in   ● ads on ╮
-│                                                                           │
-│  NOW PLAYING                    SIGHTINGS · LAST 24H                       │
-│  Tailscale                       ▁▂▃▅▇▆▅▃▂▄▆█▆▄▂▁▂▃▄▅▃▂▁                   │
-│  the VPN that disappears                                                   │
-│  tailscale.com · 12s ago        TOP ADVERTISERS                            │
-│                                  #  advertiser        ads  seen            │
-│  TOTALS                          1  Tailscale           1     8            │
-│  ads seen      42                2  Linear              2     6            │
-│  advertisers   17                3  Vercel              1     4            │
-│  sightings    128                                                         │
-│  today         12               RECENT ADS                                │
-│  this week     63                · Tailscale · the VPN that disappears     │
-│  since 2026-06-01 09:14          · Linear · issues you actually close      │
-│                                  · Vercel · ship in seconds                │
-│                                                                           │
-╰ q quit  r refresh                       read-only · observes, never bills ╯
-```
+> The dashboard above runs on `kb top --demo` with sample data. Your real numbers
+> fill in as you code with the extension running.
 
 ## What this is, and is not
 
@@ -80,6 +69,7 @@ cargo build --release
 ## Quickstart
 
 ```bash
+kb top --demo # see the dashboard right now, with sample data
 kb setup      # create the archive and capture once
 kb doctor     # confirm the extension files and archive are wired up
 kb top        # live dashboard (also captures while open)
@@ -94,6 +84,7 @@ recorded once. Polling fast never double counts.
 | Command | What it does |
 | :------ | :----------- |
 | `kb top` | Live TUI dashboard. Captures on every tick. |
+| `kb top --demo` | Render the dashboard with sample data. No archive, no writes. |
 | `kb watch [--interval N] [--once]` | Headless capture loop. Default poll is 3 seconds. |
 | `kb archive stats` | Summary: ads seen, advertisers, sightings, today, this week. |
 | `kb archive list [--limit N]` | Captured ads, most recent first. |
@@ -127,6 +118,30 @@ The archive is a single SQLite file under your platform data directory:
 It never leaves your machine. `kb export` hands it back to you as JSONL or CSV
 whenever you want it. Override the location with `KICKBACKS_KIT_DB`, and point the
 reader at a different artifact directory with `KICKBACKS_VIBE_DIR`.
+
+## FAQ
+
+**What is kickbacks-kit?**
+A small Rust command line tool that archives the ads the kickbacks.ai extension
+shows in your Claude Code and Codex spinner, and displays them in a terminal
+dashboard. Two pieces: a local ad archive (`kb archive`) and a live TUI (`kb top`).
+
+**Does it earn me more money or boost my kickbacks earnings?**
+No, and that is deliberate. It is read-only. It never posts an impression, view,
+or click, and never contacts the kickbacks.ai backend. The honest way to earn more
+is to do real work with the extension running. This tool just keeps the record.
+
+**Do I need to be signed in to kickbacks.ai?**
+No. It reads local files, so it works whether you are signed in or not. Sign-in
+only matters for the earnings the extension itself accrues.
+
+**Where is my data stored, and is anything uploaded?**
+In one SQLite file on your machine (see "Your data"). Nothing is uploaded. `kb export`
+gives you the whole corpus as JSONL or CSV.
+
+**Does it work with Codex as well as Claude Code?**
+The archive captures any ad written to the shared CLI file. Codex-specific surface
+support is on the roadmap.
 
 ## Roadmap
 
