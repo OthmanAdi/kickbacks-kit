@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local capture DB should never be committed (it is the user's personal ad history)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+kickbacks.db*
+
+# Exports
+/exports/
+*.jsonl
+*.csv
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
