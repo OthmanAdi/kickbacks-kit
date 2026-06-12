@@ -134,6 +134,9 @@ enum Command {
         /// Disable colors and the ad hyperlink
         #[arg(long)]
         plain: bool,
+        /// Do not append a feed alert (bulletin or update marker)
+        #[arg(long)]
+        no_feed: bool,
     },
     /// Live status feed: the kickbacks.ai bulletin and upstream GitHub activity
     Feed {
@@ -210,7 +213,11 @@ fn main() -> Result<()> {
             chart_style,
             tab,
         } => snapshot::run(width, plain, theme, chart_style, tab),
-        Command::Statusline { width, plain } => statusline::run(width, plain),
+        Command::Statusline {
+            width,
+            plain,
+            no_feed,
+        } => statusline::run(width, plain, no_feed),
         Command::Feed { offline, json } => feed::cli::run(offline, json),
         Command::Status => status::run(),
         Command::Setup => setup::run(),

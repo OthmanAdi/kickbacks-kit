@@ -95,6 +95,28 @@ pub fn sanitize_text(s: &str) -> String {
     out
 }
 
+/// Compare two dotted version strings numerically (`0.3.9 < 0.3.10`), treating
+/// a missing or non-numeric component as zero. A plain string sort gets this
+/// wrong, which matters for deciding whether a newer extension exists.
+pub fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (x, y) => {
+                let xv = x.and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+                let yv = y.and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+                match xv.cmp(&yv) {
+                    Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+        }
+    }
+}
+
 /// Minimal RFC-4180 CSV field quoting: wrap the value in quotes and double any
 /// internal quotes when it contains a comma, quote, carriage return, or
 /// newline. Shared by every command that writes CSV.
@@ -157,6 +179,17 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
         assert_eq!(truncate("abc", 0), "");
+    }
+
+    #[test]
+    fn version_cmp_is_numeric_not_lexical() {
+        use std::cmp::Ordering;
+        assert_eq!(version_cmp("0.3.9", "0.3.10"), Ordering::Less);
+        assert_eq!(version_cmp("0.3.172", "0.3.172"), Ordering::Equal);
+        assert_eq!(version_cmp("0.4.0", "0.3.999"), Ordering::Greater);
+        // Missing components count as zero.
+        assert_eq!(version_cmp("1", "1.0.0"), Ordering::Equal);
+        assert_eq!(version_cmp("1.2", "1.2.1"), Ordering::Less);
     }
 
     #[test]

@@ -186,6 +186,25 @@ impl FeedSnapshot {
         });
         out
     }
+
+    /// The active bulletin headline, if a bulletin is in the cache. Used by the
+    /// status line to surface the maintainer's PSA in one line.
+    pub fn bulletin_headline(&self) -> Option<&str> {
+        self.items
+            .iter()
+            .find(|i| i.kind == FeedKind::Bulletin)
+            .map(|i| i.title.as_str())
+    }
+
+    /// The latest extension version the upstream feed reported, parsed from the
+    /// version item title ("Extension synced to vX.Y.Z").
+    pub fn latest_version(&self) -> Option<String> {
+        self.items
+            .iter()
+            .find(|i| i.kind == FeedKind::Version)
+            .and_then(|i| i.title.rsplit_once(" v"))
+            .map(|(_, v)| v.to_string())
+    }
 }
 
 /// The static, never-fetched feed rows: the maintainer's X channel surfaced as

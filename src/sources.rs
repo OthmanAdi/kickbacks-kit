@@ -209,16 +209,16 @@ pub fn installed_extension_version() -> Option<String> {
     let home = dirs::home_dir()?;
     let dir = home.join(".vscode").join("extensions");
     let entries = std::fs::read_dir(dir).ok()?;
-    let mut versions: Vec<String> = entries
+    // Several versions can coexist in the extensions dir; pick the highest by
+    // numeric version order, not string order (so 0.3.10 beats 0.3.9).
+    entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             name.strip_prefix("kickbacksai.kickbacks-ai-")
                 .map(str::to_string)
         })
-        .collect();
-    versions.sort();
-    versions.pop()
+        .max_by(|a, b| crate::util::version_cmp(a, b))
 }
 
 /// How far back to look in `debug.log` for the latest `session.state`. The
