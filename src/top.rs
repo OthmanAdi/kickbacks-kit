@@ -40,6 +40,8 @@ enum Action {
     Refresh,
     /// Open the current selection's URL in a browser.
     Open,
+    /// Open the drill-down for the selected dashboard advertiser.
+    OpenAdvertiser,
 }
 
 /// A message from the background feed thread to the UI loop.
@@ -151,6 +153,14 @@ fn run_loop(
                             let _ = req_tx.send(());
                         }
                         Action::Open => open_selected(&app),
+                        Action::OpenAdvertiser => {
+                            let adv = app.selected_advertiser().map(str::to_string);
+                            if let Some(adv) = adv {
+                                app.adv_detail = Some(crate::render::build_advertiser_detail(
+                                    archive, &adv, app.now_ms,
+                                ));
+                            }
+                        }
                         Action::None => {}
                     }
                 }
@@ -212,17 +222,31 @@ fn handle_key(app: &mut App, key: event::KeyEvent, persist: bool) -> Action {
         return Action::Quit;
     }
 
+    // The advertiser drill-down captures keys while open: any of esc/q/enter/o
+    // dismisses it, everything else is swallowed so it cannot leak to the view
+    // behind the card.
+    if app.adv_detail.is_some() {
+        if matches!(
+            key.code,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char('o')
+        ) {
+            app.adv_detail = None;
+        }
+        return Action::None;
+    }
+
     // The theme picker captures all keys while open.
     if app.picker.is_some() {
         handle_picker(app, key.code, persist);
         return Action::None;
     }
 
+    let on_dashboard = app.tab == crate::render::Tab::Dashboard;
     match key.code {
         KeyCode::Char('q') => return Action::Quit,
         // Esc quits only from the dashboard; on a list tab it returns to it.
         KeyCode::Esc => {
-            if app.tab == crate::render::Tab::Dashboard {
+            if on_dashboard {
                 return Action::Quit;
             }
             app.tab = crate::render::Tab::Dashboard;
@@ -235,6 +259,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent, persist: bool) -> Action {
         KeyCode::Char('r') => return Action::Refresh,
         KeyCode::Down | KeyCode::Char('j') => app.move_cursor(true),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor(false),
+        // On the dashboard, open/enter drills into the selected advertiser; on a
+        // list tab it opens the selected item's link.
+        KeyCode::Char('o') | KeyCode::Enter if on_dashboard => return Action::OpenAdvertiser,
         KeyCode::Char('o') | KeyCode::Enter => return Action::Open,
         // `t` and `c` are dashboard controls; ignore them on the other tabs so
         // they cannot surprise the user with an off-screen change.
@@ -461,5 +488,55 @@ mod tests {
             handle_key(&mut app, press(KeyCode::Char('r')), false),
             Action::Refresh
         );
+    }
+
+    #[test]
+    fn dashboard_enter_opens_advertiser_overlay_then_esc_closes() {
+        use crate::archive::AdvertiserStat;
+        let mut app = App {
+            leaderboard: vec![
+                AdvertiserStat {
+                    advertiser: "Acme".into(),
+                    distinct_ads: 1,
+                    sightings: 5,
+                },
+                AdvertiserStat {
+                    advertiser: "Beta".into(),
+                    distinct_ads: 2,
+                    sightings: 3,
+                },
+            ],
+            ..Default::default()
+        };
+        // j moves the advertiser selection on the dashboard.
+        handle_key(&mut app, press(KeyCode::Char('j')), false);
+        assert_eq!(app.selected_advertiser(), Some("Beta"));
+        // Enter asks the loop to open the drill-down.
+        assert_eq!(
+            handle_key(&mut app, press(KeyCode::Enter), false),
+            Action::OpenAdvertiser
+        );
+        // With the overlay open, Esc closes it rather than quitting.
+        app.adv_detail = Some(crate::render::AdvertiserDetail::default());
+        assert_eq!(
+            handle_key(&mut app, press(KeyCode::Esc), false),
+            Action::None
+        );
+        assert!(app.adv_detail.is_none());
+    }
+
+    #[test]
+    fn overlay_swallows_navigation_keys() {
+        let mut app = App {
+            adv_detail: Some(crate::render::AdvertiserDetail::default()),
+            ..Default::default()
+        };
+        // A navigation key does nothing and does not leak to the view behind.
+        assert_eq!(
+            handle_key(&mut app, press(KeyCode::Char('2')), false),
+            Action::None
+        );
+        assert!(app.adv_detail.is_some());
+        assert_eq!(app.tab, Tab::Dashboard);
     }
 }

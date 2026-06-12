@@ -147,6 +147,22 @@ pub struct App {
     pub fetching: bool,
     /// Why the feed is offline this run, if it is (drives the status line).
     pub offline: Option<OfflineReason>,
+    /// Selected advertiser in the dashboard leaderboard.
+    pub adv_cursor: usize,
+    /// Present while the advertiser drill-down overlay is open.
+    pub adv_detail: Option<AdvertiserDetail>,
+}
+
+/// The drill-down card for one advertiser: its creatives, a 24 hour activity
+/// strip just for it, and the spread of when it was seen.
+#[derive(Debug, Clone, Default)]
+pub struct AdvertiserDetail {
+    pub advertiser: String,
+    pub creatives: Vec<AdRow>,
+    pub hourly: Vec<Option<u64>>,
+    pub total_sightings: i64,
+    pub first_seen_ms: Option<i64>,
+    pub last_seen_ms: Option<i64>,
 }
 
 impl App {
@@ -180,7 +196,7 @@ impl App {
     /// Number of selectable rows in the active tab's list.
     fn row_count(&self) -> usize {
         match self.tab {
-            Tab::Dashboard => 0,
+            Tab::Dashboard => self.leaderboard.len(),
             Tab::Feed => self.feed.ordered().len(),
             Tab::Links => self.links.len(),
         }
@@ -191,24 +207,34 @@ impl App {
         let feed_len = self.feed.ordered().len();
         self.feed_cursor = self.feed_cursor.min(feed_len.saturating_sub(1));
         self.links_cursor = self.links_cursor.min(self.links.len().saturating_sub(1));
+        self.adv_cursor = self
+            .adv_cursor
+            .min(self.leaderboard.len().saturating_sub(1));
     }
 
-    /// Move the active tab's selection by `delta` rows, saturating at the ends.
+    /// Move the active tab's selection by one row, saturating at the ends.
     pub fn move_cursor(&mut self, down: bool) {
         let n = self.row_count();
         if n == 0 {
             return;
         }
         let cur = match self.tab {
+            Tab::Dashboard => &mut self.adv_cursor,
             Tab::Feed => &mut self.feed_cursor,
             Tab::Links => &mut self.links_cursor,
-            Tab::Dashboard => return,
         };
         if down {
             *cur = (*cur + 1).min(n - 1);
         } else {
             *cur = cur.saturating_sub(1);
         }
+    }
+
+    /// The advertiser currently selected in the dashboard leaderboard, if any.
+    pub fn selected_advertiser(&self) -> Option<&str> {
+        self.leaderboard
+            .get(self.adv_cursor)
+            .map(|a| a.advertiser.as_str())
     }
 
     /// The URL the current selection points at, if any (for opening in a
@@ -436,6 +462,9 @@ pub fn ui(frame: &mut Frame, app: &App) {
         Tab::Links => render_links(frame, content, app),
     }
 
+    if app.adv_detail.is_some() {
+        render_advertiser_overlay(frame, area, app);
+    }
     if app.picker.is_some() {
         render_theme_picker(frame, area, app);
     }
@@ -888,12 +917,24 @@ fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let name_w = body.width.saturating_sub(14) as usize;
+    let on_dashboard = app.tab == Tab::Dashboard;
     let rows = app.leaderboard.iter().enumerate().map(|(i, a)| {
+        let selected = on_dashboard && i == app.adv_cursor;
+        let rank = if selected {
+            Span::styled("▌", fg(pal.gold))
+        } else {
+            Span::styled(format!("{:>2}", i + 1), fg(pal.dim))
+        };
+        let name_style = if selected {
+            fg(pal.gold).add_modifier(Modifier::BOLD)
+        } else {
+            fg(pal.fg)
+        };
         Row::new(vec![
-            Cell::from(Span::styled(format!("{:>2}", i + 1), fg(pal.dim))),
+            Cell::from(rank),
             Cell::from(Span::styled(
                 util::truncate(&a.advertiser, name_w),
-                fg(pal.fg),
+                name_style,
             )),
             Cell::from(Span::styled(a.distinct_ads.to_string(), fg(pal.dim))),
             Cell::from(Span::styled(
@@ -1138,6 +1179,127 @@ fn render_links(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(idx, link)| link_line(link, idx == app.links_cursor, width, app.now_ms, pal))
         .collect();
     frame.render_widget(Paragraph::new(lines), body);
+}
+
+// ---- advertiser drill-down ------------------------------------------------
+
+/// Assemble the drill-down detail for one advertiser from the archive. Pure
+/// reads; safe to call when opening the overlay.
+pub fn build_advertiser_detail(
+    archive: &Archive,
+    advertiser: &str,
+    now_ms: i64,
+) -> AdvertiserDetail {
+    let creatives = archive.advertiser_ads(advertiser, 12).unwrap_or_default();
+    let hourly = archive
+        .advertiser_hourly(advertiser, now_ms, 24)
+        .unwrap_or_default();
+    let total_sightings = creatives.iter().map(|c| c.times_seen).sum();
+    let first_seen_ms = creatives.iter().map(|c| c.first_seen_ms).min();
+    let last_seen_ms = creatives.iter().map(|c| c.last_seen_ms).max();
+    AdvertiserDetail {
+        advertiser: advertiser.to_string(),
+        creatives,
+        hourly,
+        total_sightings,
+        first_seen_ms,
+        last_seen_ms,
+    }
+}
+
+/// Draw the advertiser drill-down as a centered card over the dashboard.
+fn render_advertiser_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let pal = &app.palette;
+    let Some(detail) = &app.adv_detail else {
+        return;
+    };
+    let w = (area.width as f32 * 0.7) as u16;
+    let h = (area.height as f32 * 0.75) as u16;
+    let card = centered(area, w.clamp(40, 90), h.clamp(10, 28));
+    frame.render_widget(Clear, card);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(fg(pal.gold))
+        .style(bg_style(pal))
+        .padding(Padding::new(1, 1, 0, 0))
+        .title_top(Line::from(Span::styled(
+            format!(" {} ", detail.advertiser),
+            fg(pal.gold).add_modifier(Modifier::BOLD),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            " esc close ",
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
+        )));
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
+
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(4),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    // Summary line.
+    let span = format_seen_span(detail, app.now_ms);
+    let summary = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{}", detail.total_sightings),
+                fg(pal.teal).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" sightings · ", fg(pal.dim)),
+            Span::styled(format!("{} creatives", detail.creatives.len()), fg(pal.fg)),
+        ]),
+        Line::from(Span::styled(span, fg(pal.dim))),
+    ]);
+    frame.render_widget(summary, rows[0]);
+
+    // A 24 hour activity strip just for this advertiser, reusing the heat strip.
+    let chart_head = section(frame, rows[1], pal, "SIGHTINGS · LAST 24H");
+    if detail.hourly.iter().all(Option::is_none) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("no sightings in 24h", fg(pal.dim)))),
+            chart_head,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(heat_strip(&detail.hourly, chart_head, pal)),
+            chart_head,
+        );
+    }
+
+    // The creatives.
+    let list_head = section(frame, rows[2], pal, "CREATIVES");
+    let width = list_head.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = detail
+        .creatives
+        .iter()
+        .map(|c| {
+            Line::from(vec![
+                Span::styled(format!("{:>3}× ", c.times_seen), fg(pal.gold)),
+                Span::styled(
+                    util::truncate(&c.ad_text, width.saturating_sub(5)),
+                    fg(pal.fg),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_head);
+}
+
+/// "seen first … last" line for the advertiser card.
+fn format_seen_span(detail: &AdvertiserDetail, now_ms: i64) -> String {
+    match (detail.first_seen_ms, detail.last_seen_ms) {
+        (Some(first), Some(last)) => format!(
+            "first {} · last {}",
+            util::fmt_datetime(first),
+            util::human_age(now_ms - last)
+        ),
+        _ => "not seen yet".to_string(),
+    }
 }
 
 /// One link row: marker + advertiser + host + sighting count + age.
@@ -1476,6 +1638,67 @@ mod tests {
                 assert!(out.contains("TOP ADVERTISERS"));
             }
         }
+    }
+
+    #[test]
+    fn feed_and_links_tabs_render() {
+        let mut app = demo_app();
+        app.tab = Tab::Feed;
+        let feed = rendered(&app);
+        assert!(feed.contains("Feed"));
+        assert!(feed.contains("bot army"));
+        assert!(feed.contains("synced"));
+
+        app.tab = Tab::Links;
+        let links = rendered(&app);
+        assert!(links.contains("ADVERTISER LINKS"));
+    }
+
+    #[test]
+    fn advertiser_overlay_renders_with_creatives() {
+        let mut app = demo_app();
+        app.adv_detail = Some(AdvertiserDetail {
+            advertiser: "Tailscale".to_string(),
+            creatives: vec![AdRow {
+                id: "x".to_string(),
+                advertiser: "Tailscale".to_string(),
+                ad_text: "Tailscale · the VPN that disappears".to_string(),
+                click_url: Some("https://tailscale.com/".to_string()),
+                first_seen_ms: DEMO_NOW_MS - 3_600_000,
+                last_seen_ms: DEMO_NOW_MS - 60_000,
+                times_seen: 7,
+            }],
+            hourly: vec![Some(2), None, Some(1)],
+            total_sightings: 7,
+            first_seen_ms: Some(DEMO_NOW_MS - 3_600_000),
+            last_seen_ms: Some(DEMO_NOW_MS - 60_000),
+        });
+        let out = rendered(&app);
+        assert!(out.contains("Tailscale"));
+        assert!(out.contains("CREATIVES"));
+        assert!(out.contains("the VPN that disappears"));
+        assert!(out.contains("sightings"));
+    }
+
+    #[test]
+    fn build_advertiser_detail_reads_archive() {
+        let mut a = Archive::open_in_memory().unwrap();
+        let now = 100 * HOUR_MS;
+        a.capture_ad(
+            &CliAd {
+                ad_text: "Acme · go fast".to_string(),
+                click_url: Some("https://acme.com/".to_string()),
+                icon_url: None,
+                icon_ref: None,
+                ts: now - 60_000,
+            },
+            now - 60_000,
+        )
+        .unwrap();
+        let detail = build_advertiser_detail(&a, "Acme", now);
+        assert_eq!(detail.advertiser, "Acme");
+        assert_eq!(detail.creatives.len(), 1);
+        assert_eq!(detail.total_sightings, 1);
     }
 
     #[test]

@@ -120,6 +120,16 @@ pub struct LinkRow {
     pub times_seen: i64,
 }
 
+/// A transition of the kickbacks.ai server-side killswitch, derived from the
+/// extension lifecycle log: the moments ads were paused or resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KillswitchEvent {
+    pub ts_ms: i64,
+    pub ts_iso: String,
+    /// True when this transition turned the killswitch ON (ads paused).
+    pub killed: bool,
+}
+
 /// Result of a single capture pass.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureReport {
@@ -353,6 +363,86 @@ impl Archive {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The captured creatives for one advertiser, most recently seen first.
+    /// The advertiser name is bound as a parameter, never interpolated.
+    pub fn advertiser_ads(&self, advertiser: &str, limit: usize) -> Result<Vec<AdRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, advertiser, ad_text, click_url, first_seen_ms, last_seen_ms, times_seen
+             FROM ads WHERE advertiser = ?1 ORDER BY last_seen_ms DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![advertiser, limit as i64], Self::map_ad_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Per-advertiser hourly sightings for the last `hours` clock hours, oldest
+    /// first. `Some(n)` is an hour with `n` sightings of this advertiser; `None`
+    /// is an hour with none, so the drill-down sparkline reads like the main one.
+    pub fn advertiser_hourly(
+        &self,
+        advertiser: &str,
+        now_ms: i64,
+        hours: usize,
+    ) -> Result<Vec<Option<u64>>> {
+        let end_hour = now_ms / HOUR_MS * HOUR_MS;
+        let start = end_hour - (hours as i64 - 1) * HOUR_MS;
+        let mut buckets: Vec<Option<u64>> = vec![None; hours];
+        let mut stmt = self.conn.prepare(
+            "SELECT (s.observed_ms / ?1) * ?1 AS hour_ms, COUNT(*) AS cnt
+             FROM sightings s JOIN ads a ON s.ad_id = a.id
+             WHERE a.advertiser = ?2 AND s.observed_ms >= ?3
+             GROUP BY hour_ms",
+        )?;
+        let counts = stmt
+            .query_map(params![HOUR_MS, advertiser, start], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (hour, cnt) in counts {
+            let idx = ((hour - start) / HOUR_MS) as usize;
+            if idx < hours {
+                buckets[idx] = Some(cnt as u64);
+            }
+        }
+        Ok(buckets)
+    }
+
+    /// The killswitch transitions recorded in the lifecycle log, newest first,
+    /// capped at `limit`. Only the moments the `killed` flag flipped are kept,
+    /// so a log full of repeated identical states collapses to its transitions.
+    pub fn killswitch_timeline(&self, limit: usize) -> Result<Vec<KillswitchEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts_iso, ts_ms, killed FROM events
+             WHERE killed IS NOT NULL ORDER BY ts_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut transitions = Vec::new();
+        let mut prev: Option<bool> = None;
+        for (ts_iso, ts_ms, killed) in rows {
+            if prev != Some(killed) {
+                transitions.push(KillswitchEvent {
+                    ts_ms,
+                    ts_iso,
+                    killed,
+                });
+                prev = Some(killed);
+            }
+        }
+        transitions.reverse();
+        transitions.truncate(limit);
+        Ok(transitions)
     }
 
     /// Advertiser leaderboard by total sightings, then distinct creatives.
@@ -701,5 +791,79 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM coverage", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn distinct_links_dedupes_by_url() {
+        let mut a = Archive::open_in_memory().unwrap();
+        a.capture_ad(&ad("Acme · one", "https://acme.com/", 1), 10)
+            .unwrap();
+        a.capture_ad(&ad("Acme · two", "https://acme.com/", 2), 20)
+            .unwrap();
+        a.capture_ad(&ad("Beta · x", "https://beta.io/", 3), 30)
+            .unwrap();
+        let links = a.distinct_links(10).unwrap();
+        // Two distinct URLs despite three creatives; newest URL first.
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].url, "https://beta.io/");
+        assert_eq!(links[1].url, "https://acme.com/");
+    }
+
+    #[test]
+    fn advertiser_ads_and_hourly() {
+        let mut a = Archive::open_in_memory().unwrap();
+        let now = 100 * HOUR_MS + 30 * 60 * 1000;
+        a.capture_ad(
+            &ad("Tailscale · a", "https://tailscale.com/", 1),
+            now - 30 * 60 * 1000,
+        )
+        .unwrap(); // hour 100
+        a.capture_ad(
+            &ad("Tailscale · b", "https://tailscale.com/", 2),
+            now - 90 * 60 * 1000,
+        )
+        .unwrap(); // hour 99
+        a.capture_ad(&ad("Other · c", "https://other.com/", 3), now)
+            .unwrap();
+
+        let ads = a.advertiser_ads("Tailscale", 10).unwrap();
+        assert_eq!(ads.len(), 2);
+        assert!(ads.iter().all(|r| r.advertiser == "Tailscale"));
+
+        let hourly = a.advertiser_hourly("Tailscale", now, 3).unwrap();
+        assert_eq!(hourly, vec![None, Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn killswitch_timeline_collapses_to_transitions() {
+        let mut a = Archive::open_in_memory().unwrap();
+        let ev = |iso: &str, ms: i64, killed: bool| LogEvent {
+            ts_iso: iso.to_string(),
+            ts_ms: ms,
+            name: "session.state".to_string(),
+            signed_in: Some(true),
+            has_ad: None,
+            injection_on: Some(true),
+            killed: Some(killed),
+            cc_version: None,
+            raw: format!("{iso}|{killed}"),
+        };
+        // off, off, ON, ON, off  ->  three transitions: off, on, off.
+        a.record_events(&[
+            ev("2026-06-12T10:00:00.000Z", 1000, false),
+            ev("2026-06-12T10:01:00.000Z", 2000, false),
+            ev("2026-06-12T10:02:00.000Z", 3000, true),
+            ev("2026-06-12T10:03:00.000Z", 4000, true),
+            ev("2026-06-12T10:04:00.000Z", 5000, false),
+        ])
+        .unwrap();
+        let timeline = a.killswitch_timeline(10).unwrap();
+        // Newest first.
+        assert_eq!(timeline.len(), 3);
+        assert!(!timeline[0].killed); // most recent: resumed
+        assert_eq!(timeline[0].ts_ms, 5000);
+        assert!(timeline[1].killed); // paused
+        assert_eq!(timeline[1].ts_ms, 3000);
+        assert!(!timeline[2].killed); // initial off
     }
 }
