@@ -1208,15 +1208,26 @@ pub fn build_advertiser_detail(
     }
 }
 
-/// Draw the advertiser drill-down as a centered card over the dashboard.
+/// Draw the advertiser drill-down as a centered card over the dashboard. The
+/// card is sized to its content, not to a fixed fraction of the screen, so a
+/// short advertiser does not leave a large empty void below the list.
 fn render_advertiser_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let pal = &app.palette;
     let Some(detail) = &app.adv_detail else {
         return;
     };
-    let w = (area.width as f32 * 0.7) as u16;
-    let h = (area.height as f32 * 0.75) as u16;
-    let card = centered(area, w.clamp(40, 90), h.clamp(10, 28));
+
+    // Section heights (each section is a 1-line header plus its body).
+    let has_chart = !detail.hourly.iter().all(Option::is_none);
+    let chart_body = if has_chart { 3 } else { 1 }; // strip + ticks + legend, or one note
+    let chart_h = 1 + chart_body;
+    let creatives_n = detail.creatives.len().clamp(1, 10) as u16;
+    let creatives_h = 1 + creatives_n;
+    // summary(2) + gap + chart + gap + creatives, plus the two border rows.
+    let inner_h = 2 + 1 + chart_h + 1 + creatives_h;
+    let card_h = (inner_h + 2).min(area.height.saturating_sub(2)).max(10);
+    let card_w = ((area.width as f32 * 0.7) as u16).clamp(48, 88);
+    let card = centered(area, card_w, card_h);
     frame.render_widget(Clear, card);
 
     let block = Block::default()
@@ -1224,60 +1235,81 @@ fn render_advertiser_overlay(frame: &mut Frame, area: Rect, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(fg(pal.gold))
         .style(bg_style(pal))
-        .padding(Padding::new(1, 1, 0, 0))
+        .padding(Padding::new(2, 2, 0, 0))
         .title_top(Line::from(Span::styled(
             format!(" {} ", detail.advertiser),
             fg(pal.gold).add_modifier(Modifier::BOLD),
         )))
-        .title_bottom(Line::from(Span::styled(
-            " esc close ",
-            fg(pal.dim).add_modifier(Modifier::ITALIC),
-        )));
+        .title_bottom(
+            Line::from(Span::styled(
+                " esc close ",
+                fg(pal.dim).add_modifier(Modifier::ITALIC),
+            ))
+            .right_aligned(),
+        );
     let inner = block.inner(card);
     frame.render_widget(block, card);
 
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(4),
-        Constraint::Min(0),
+        Constraint::Length(2),           // summary
+        Constraint::Length(1),           // gap
+        Constraint::Length(chart_h),     // chart
+        Constraint::Length(1),           // gap
+        Constraint::Length(creatives_h), // creatives header + list
     ])
     .split(inner);
 
-    // Summary line.
-    let span = format_seen_span(detail, app.now_ms);
+    // Summary: counts on one line, the seen span on the next.
     let summary = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                format!("{}", detail.total_sightings),
+                detail.total_sightings.to_string(),
                 fg(pal.teal).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" sightings · ", fg(pal.dim)),
-            Span::styled(format!("{} creatives", detail.creatives.len()), fg(pal.fg)),
+            Span::styled(
+                format!(
+                    " {} · ",
+                    plural(detail.total_sightings as usize, "sighting")
+                ),
+                fg(pal.dim),
+            ),
+            Span::styled(
+                format!(
+                    "{} {}",
+                    detail.creatives.len(),
+                    plural(detail.creatives.len(), "creative")
+                ),
+                fg(pal.fg),
+            ),
         ]),
-        Line::from(Span::styled(span, fg(pal.dim))),
+        Line::from(Span::styled(
+            format_seen_span(detail, app.now_ms),
+            fg(pal.dim),
+        )),
     ]);
     frame.render_widget(summary, rows[0]);
 
     // A 24 hour activity strip just for this advertiser, reusing the heat strip.
-    let chart_head = section(frame, rows[1], pal, "SIGHTINGS · LAST 24H");
-    if detail.hourly.iter().all(Option::is_none) {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("no sightings in 24h", fg(pal.dim)))),
-            chart_head,
-        );
-    } else {
+    let chart_head = section(frame, rows[2], pal, "SIGHTINGS · LAST 24H");
+    if has_chart {
         frame.render_widget(
             Paragraph::new(heat_strip(&detail.hourly, chart_head, pal)),
             chart_head,
         );
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("no sightings in 24h", fg(pal.dim)))),
+            chart_head,
+        );
     }
 
-    // The creatives.
-    let list_head = section(frame, rows[2], pal, "CREATIVES");
-    let width = list_head.width.saturating_sub(2) as usize;
+    // The creatives, capped to the rows the card allows.
+    let list_head = section(frame, rows[4], pal, "CREATIVES");
+    let width = list_head.width as usize;
     let lines: Vec<Line> = detail
         .creatives
         .iter()
+        .take(creatives_n as usize)
         .map(|c| {
             Line::from(vec![
                 Span::styled(format!("{:>3}× ", c.times_seen), fg(pal.gold)),
@@ -1289,6 +1321,15 @@ fn render_advertiser_overlay(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), list_head);
+}
+
+/// `1 sighting` / `2 sightings`: append `s` unless the count is one.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
 }
 
 /// "seen first … last" line for the advertiser card.
@@ -1442,6 +1483,56 @@ mod tests {
         assert!(out.contains("kickbacks"));
         assert!(out.contains("NOW PLAYING"));
         assert!(out.contains("no ad right now"));
+    }
+
+    #[test]
+    fn advertiser_overlay_is_sized_to_content() {
+        // A single-creative advertiser must not leave a tall empty void: the
+        // card height tracks the content, capped to the screen.
+        let mut app = demo_app();
+        app.adv_detail = Some(AdvertiserDetail {
+            advertiser: "Railway.com".to_string(),
+            creatives: vec![AdRow {
+                id: "x".to_string(),
+                advertiser: "Railway.com".to_string(),
+                ad_text: "Railway.com - Deploy Anything".to_string(),
+                click_url: Some("https://railway.com/".to_string()),
+                first_seen_ms: DEMO_NOW_MS - 3_600_000,
+                last_seen_ms: DEMO_NOW_MS - 3_600_000,
+                times_seen: 14,
+            }],
+            hourly: vec![None; 24],
+            total_sightings: 14,
+            first_seen_ms: Some(DEMO_NOW_MS - 3_600_000),
+            last_seen_ms: Some(DEMO_NOW_MS - 3_600_000),
+        });
+        let backend = TestBackend::new(90, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width)
+                .map(|x| {
+                    buf.content[(y as usize) * buf.area.width as usize + x as usize]
+                        .symbol()
+                        .to_string()
+                })
+                .collect()
+        };
+        let row_with = |needle: &str| (0..buf.area.height).find(|&y| row_text(y).contains(needle));
+
+        // The card's bottom border (its `esc close`) must sit just under the
+        // CREATIVES list, not far below it with a tall empty void between.
+        let creatives = row_with("CREATIVES").expect("CREATIVES header");
+        let close = row_with("esc close").expect("card bottom border");
+        assert!(
+            close > creatives && close - creatives <= 4,
+            "void below CREATIVES: header at {creatives}, bottom at {close}"
+        );
+        // Pluralization is correct for a single creative.
+        let text = text_of(&buf);
+        assert!(text.contains("1 creative"));
+        assert!(!text.contains("1 creatives"));
     }
 
     #[test]
