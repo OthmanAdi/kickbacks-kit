@@ -19,6 +19,7 @@ const OFFSET_KEY: &str = "debug_log_offset";
 pub fn capture_pass(archive: &mut Archive) -> Result<CaptureReport> {
     let now_ms = Utc::now().timestamp_millis();
     let mut report = CaptureReport::default();
+    archive.record_observation(now_ms)?;
 
     if let Some(ad) = sources::read_cli_ad()? {
         report.advertiser = Some(ad.advertiser());

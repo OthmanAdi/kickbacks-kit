@@ -40,7 +40,8 @@ const FRESH_MS: i64 = 600_000;
 struct App {
     now_ms: i64,
     stats: Stats,
-    sparkline: Vec<u64>,
+    /// Hourly activity, oldest first. `None` = kb was not watching that hour.
+    sparkline: Vec<Option<u64>>,
     leaderboard: Vec<AdvertiserStat>,
     recent: Vec<AdRow>,
     live: LiveState,
@@ -53,7 +54,7 @@ impl App {
         let now = util::now_ms();
         self.now_ms = now;
         self.stats = archive.stats(now)?;
-        self.sparkline = archive.sightings_per_hour(now, 24)?;
+        self.sparkline = archive.hourly_activity(now, 24)?;
         self.leaderboard = archive.advertiser_leaderboard(8)?;
         self.recent = archive.list_ads(8)?;
         self.live = sources::read_live_state().unwrap_or_default();
@@ -125,9 +126,12 @@ fn demo_app() -> App {
             first_seen_ms: Some(1_780_640_040_000),
             last_seen_ms: Some(1_781_209_988_000),
         },
-        sparkline: vec![
+        sparkline: [
             1, 2, 1, 3, 4, 6, 5, 7, 6, 8, 6, 9, 7, 5, 4, 6, 8, 7, 5, 3, 4, 6, 5, 2,
-        ],
+        ]
+        .into_iter()
+        .map(Some)
+        .collect(),
         leaderboard: vec![
             advertiser("Tailscale", 4, 23),
             advertiser("Linear", 3, 19),
@@ -451,18 +455,34 @@ fn render_totals(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
     let body = section(frame, area, "SIGHTINGS · LAST 24H");
-    if app.sparkline.iter().all(|&v| v == 0) {
+    if app.sparkline.iter().all(Option::is_none) {
         let hint = Paragraph::new(Line::from(Span::styled(
-            "no sightings yet — keep the extension running",
+            "not watching — run kb watch or keep kb top open",
             Style::default().fg(DIM),
         )));
         frame.render_widget(hint, body);
         return;
     }
+    let has_gaps = app.sparkline.iter().any(Option::is_none);
+    let (spark_area, legend_area) = if has_gaps && body.height > 1 {
+        let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(body);
+        (parts[0], Some(parts[1]))
+    } else {
+        (body, None)
+    };
     let spark = Sparkline::default()
-        .data(&app.sparkline)
-        .style(Style::default().fg(GOLD));
-    frame.render_widget(spark, body);
+        .data(app.sparkline.iter().copied())
+        .style(Style::default().fg(GOLD))
+        .absent_value_symbol("░")
+        .absent_value_style(Style::default().fg(DIM));
+    frame.render_widget(spark, spark_area);
+    if let Some(legend) = legend_area {
+        let note = Paragraph::new(Line::from(Span::styled(
+            "░ hours kb was not watching",
+            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+        )));
+        frame.render_widget(note, legend);
+    }
 }
 
 fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
@@ -578,7 +598,7 @@ mod tests {
                 first_seen_ms: Some(1_781_210_098_155),
                 last_seen_ms: Some(1_781_210_380_000),
             },
-            sparkline: vec![0, 1, 2, 3, 2, 1, 4],
+            sparkline: vec![None, Some(1), Some(2), Some(3), Some(2), Some(1), Some(4)],
             leaderboard: vec![AdvertiserStat {
                 advertiser: "Tailscale".to_string(),
                 distinct_ads: 1,
@@ -611,6 +631,28 @@ mod tests {
         assert!(out.contains("Tailscale"));
         assert!(out.contains("TOP ADVERTISERS"));
         assert!(out.contains("signed in"));
+    }
+
+    #[test]
+    fn sparkline_gaps_render_as_not_watching() {
+        let app = App {
+            now_ms: 1_781_210_400_000,
+            sparkline: vec![None, Some(2), None, Some(4)],
+            ..App::default()
+        };
+        let out = rendered(&app);
+        assert!(out.contains("░"));
+        assert!(out.contains("hours kb was not watching"));
+    }
+
+    #[test]
+    fn sparkline_all_unobserved_says_not_watching() {
+        let app = App {
+            sparkline: vec![None; 24],
+            ..App::default()
+        };
+        let out = rendered(&app);
+        assert!(out.contains("not watching — run kb watch"));
     }
 
     #[test]

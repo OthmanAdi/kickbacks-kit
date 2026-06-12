@@ -13,6 +13,9 @@ use crate::model::AdRow;
 use crate::model::CliAd;
 use crate::sources::LogEvent;
 
+/// One clock hour in epoch milliseconds.
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS ads (
     id            TEXT PRIMARY KEY,
@@ -49,6 +52,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
+);
+
+-- Hours (absolute clock-hour start, epoch ms) in which a capture pass ran.
+-- Lets the dashboard distinguish "0 ads" from "kb was not watching".
+CREATE TABLE IF NOT EXISTS coverage (
+    hour_ms INTEGER PRIMARY KEY
 );
 "#;
 
@@ -168,6 +177,17 @@ impl Archive {
         }
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// Record that a capture pass observed the local artifacts at `now_ms`.
+    /// One row per absolute clock hour; re-recording the same hour is a no-op.
+    pub fn record_observation(&mut self, now_ms: i64) -> Result<()> {
+        let hour = now_ms / HOUR_MS * HOUR_MS;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO coverage (hour_ms) VALUES (?1)",
+            params![hour],
+        )?;
+        Ok(())
     }
 
     /// Read a string value from the `meta` table.
@@ -290,12 +310,28 @@ impl Archive {
         Ok(rows)
     }
 
-    /// Sightings bucketed into the last `hours` one-hour windows, oldest first.
-    /// Suitable as `Sparkline` data.
-    pub fn sightings_per_hour(&self, now_ms: i64, hours: usize) -> Result<Vec<u64>> {
-        let hour_ms = 60 * 60 * 1000i64;
-        let mut buckets = vec![0u64; hours];
-        let start = now_ms - (hours as i64) * hour_ms;
+    /// Activity for the last `hours` clock hours, oldest first, ending with
+    /// the hour containing `now_ms`. `Some(n)` means kb was observing during
+    /// that hour and recorded `n` sightings; `None` means kb was not watching,
+    /// so the hour holds no data (which is not the same as zero ads).
+    pub fn hourly_activity(&self, now_ms: i64, hours: usize) -> Result<Vec<Option<u64>>> {
+        let end_hour = now_ms / HOUR_MS * HOUR_MS;
+        let start = end_hour - (hours as i64 - 1) * HOUR_MS;
+        let mut buckets: Vec<Option<u64>> = vec![None; hours];
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hour_ms FROM coverage WHERE hour_ms >= ?1")?;
+        let observed = stmt
+            .query_map(params![start], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for h in observed {
+            let idx = ((h - start) / HOUR_MS) as usize;
+            if idx < hours {
+                buckets[idx] = Some(0);
+            }
+        }
+
         let mut stmt = self
             .conn
             .prepare("SELECT observed_ms FROM sightings WHERE observed_ms >= ?1")?;
@@ -303,9 +339,11 @@ impl Archive {
             .query_map(params![start], |r| r.get::<_, i64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for t in times {
-            let idx = ((t - start) / hour_ms) as usize;
+            let idx = ((t - start) / HOUR_MS) as usize;
             if idx < hours {
-                buckets[idx] += 1;
+                // A recorded sighting proves we were watching that hour, even
+                // for archives that predate the coverage table.
+                buckets[idx] = Some(buckets[idx].unwrap_or(0) + 1);
             }
         }
         Ok(buckets)
@@ -398,15 +436,37 @@ mod tests {
     }
 
     #[test]
-    fn sparkline_buckets_recent_sightings() {
+    fn hourly_activity_buckets_recent_sightings() {
         let mut a = Archive::open_in_memory().unwrap();
-        let now = 100 * 60 * 60 * 1000; // 100h in ms
+        let now = 100 * HOUR_MS + 30 * 60 * 1000; // 100h30m
         a.capture_ad(&ad("X · 1", "https://x.com/", 1), now - 30 * 60 * 1000)
-            .unwrap(); // ~0.5h ago
+            .unwrap(); // hour 100
         a.capture_ad(&ad("X · 2", "https://x.com/", 2), now - 90 * 60 * 1000)
-            .unwrap(); // ~1.5h ago
-        let buckets = a.sightings_per_hour(now, 3).unwrap();
+            .unwrap(); // hour 99
+        let buckets = a.hourly_activity(now, 3).unwrap();
         assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets.iter().sum::<u64>(), 2);
+        assert_eq!(buckets, vec![None, Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn hourly_activity_distinguishes_unobserved_from_zero() {
+        let mut a = Archive::open_in_memory().unwrap();
+        let now = 100 * HOUR_MS + 30 * 60 * 1000;
+        // Hour 99: a capture pass ran but saw no ads -> Some(0), not None.
+        a.record_observation(99 * HOUR_MS + 10).unwrap();
+        let buckets = a.hourly_activity(now, 3).unwrap();
+        assert_eq!(buckets, vec![None, Some(0), None]);
+    }
+
+    #[test]
+    fn record_observation_is_idempotent_per_hour() {
+        let mut a = Archive::open_in_memory().unwrap();
+        a.record_observation(99 * HOUR_MS + 10).unwrap();
+        a.record_observation(99 * HOUR_MS + 20_000).unwrap();
+        let n: i64 = a
+            .conn
+            .query_row("SELECT COUNT(*) FROM coverage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }
