@@ -17,7 +17,7 @@ use ratatui::DefaultTerminal;
 use crate::archive::Archive;
 use crate::capture::capture_pass;
 use crate::chart::ChartStyle;
-use crate::config::{self, Config};
+use crate::config;
 use crate::paths;
 use crate::render::{demo_app, ui, App, ThemePicker};
 use crate::theme::Theme;
@@ -123,10 +123,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent, persist: bool) -> bool {
         KeyCode::Char('c') => {
             app.chart_style = app.chart_style.next();
             if persist {
-                let _ = config::save(&Config {
-                    theme: app.theme,
-                    chart_style: app.chart_style,
-                });
+                let _ = config::save_prefs(app.theme, app.chart_style);
             }
         }
         _ => {}
@@ -154,10 +151,7 @@ fn handle_picker(app: &mut App, code: KeyCode, persist: bool) {
             if let Some(theme) = app.picker.as_ref().map(ThemePicker::selected) {
                 app.set_theme(theme);
                 if persist {
-                    let _ = config::save(&Config {
-                        theme,
-                        chart_style: app.chart_style,
-                    });
+                    let _ = config::save_prefs(theme, app.chart_style);
                 }
             }
             app.picker = None;

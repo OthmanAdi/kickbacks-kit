@@ -6,9 +6,10 @@
 //! the kickbacks.ai backend.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+use crate::feed::{FeedItem, FeedKind, SourceHealth};
 use crate::model::AdRow;
 use crate::model::CliAd;
 use crate::sources::LogEvent;
@@ -58,6 +59,35 @@ CREATE TABLE IF NOT EXISTS meta (
 -- Lets the dashboard distinguish "0 ads" from "kb was not watching".
 CREATE TABLE IF NOT EXISTS coverage (
     hour_ms INTEGER PRIMARY KEY
+);
+
+-- Cached live-feed items (the status feed). Written by the network sync; read
+-- by every surface, so the status line and snapshots render with no network.
+CREATE TABLE IF NOT EXISTS feed_items (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL DEFAULT '',
+    url        TEXT,
+    ts_ms      INTEGER,
+    source     TEXT NOT NULL,
+    fetched_ms INTEGER NOT NULL,
+    -- ts_ms when known, else fetched_ms; the single ordering key.
+    sort_ms    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feed_sort ON feed_items(sort_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_source ON feed_items(source);
+
+-- Per-source feed health: ETag for conditional requests, last status, and the
+-- circuit-breaker state. Persisted so a backing-off source stays backed off
+-- across runs and the UI can always say when it last reached each source.
+CREATE TABLE IF NOT EXISTS feed_sources (
+    source           TEXT PRIMARY KEY,
+    etag             TEXT,
+    last_status      TEXT NOT NULL DEFAULT '',
+    last_sync_ms     INTEGER,
+    failures         INTEGER NOT NULL DEFAULT 0,
+    circuit_until_ms INTEGER
 );
 "#;
 
@@ -359,6 +389,132 @@ impl Archive {
             }
         }
         Ok(buckets)
+    }
+
+    // ---- live feed cache --------------------------------------------------
+
+    /// Replace all cached feed items for one source with a fresh set. A source's
+    /// items are owned wholesale by its last successful fetch, so a stale item
+    /// never lingers after the source stops returning it. Items from other
+    /// sources are untouched.
+    pub fn replace_feed_items(
+        &mut self,
+        source: &str,
+        items: &[FeedItem],
+        fetched_ms: i64,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM feed_items WHERE source = ?1", params![source])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO feed_items
+                 (id, kind, title, body, url, ts_ms, source, fetched_ms, sort_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
+            for it in items {
+                let sort_ms = it.ts_ms.unwrap_or(fetched_ms);
+                stmt.execute(params![
+                    it.id,
+                    it.kind.as_str(),
+                    it.title,
+                    it.body,
+                    it.url,
+                    it.ts_ms,
+                    it.source,
+                    fetched_ms,
+                    sort_ms,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Read cached feed items, newest first by sort key, capped at `limit`.
+    pub fn read_feed_items(&self, limit: usize) -> Result<Vec<FeedItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, title, body, url, ts_ms, source
+             FROM feed_items ORDER BY sort_ms DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok(FeedItem {
+                    id: r.get(0)?,
+                    kind: FeedKind::from_str(&r.get::<_, String>(1)?),
+                    title: r.get(2)?,
+                    body: r.get(3)?,
+                    url: r.get(4)?,
+                    ts_ms: r.get(5)?,
+                    source: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Read one source's health, or a default (never-synced) record.
+    pub fn feed_source(&self, source: &str) -> Result<SourceHealth> {
+        let health = self
+            .conn
+            .query_row(
+                "SELECT source, etag, last_status, last_sync_ms, failures, circuit_until_ms
+                 FROM feed_sources WHERE source = ?1",
+                params![source],
+                Self::map_source_health,
+            )
+            .optional()?
+            .unwrap_or_else(|| SourceHealth {
+                source: source.to_string(),
+                ..Default::default()
+            });
+        Ok(health)
+    }
+
+    /// Read every source's health (for the feed UI's status footer).
+    pub fn all_feed_sources(&self) -> Result<Vec<SourceHealth>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, etag, last_status, last_sync_ms, failures, circuit_until_ms
+             FROM feed_sources ORDER BY source",
+        )?;
+        let rows = stmt
+            .query_map([], Self::map_source_health)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Upsert one source's health record.
+    pub fn set_feed_source(&mut self, h: &SourceHealth) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO feed_sources
+             (source, etag, last_status, last_sync_ms, failures, circuit_until_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(source) DO UPDATE SET
+                 etag = excluded.etag,
+                 last_status = excluded.last_status,
+                 last_sync_ms = excluded.last_sync_ms,
+                 failures = excluded.failures,
+                 circuit_until_ms = excluded.circuit_until_ms",
+            params![
+                h.source,
+                h.etag,
+                h.last_status,
+                h.last_sync_ms,
+                h.failures,
+                h.circuit_until_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn map_source_health(r: &rusqlite::Row<'_>) -> rusqlite::Result<SourceHealth> {
+        Ok(SourceHealth {
+            source: r.get(0)?,
+            etag: r.get(1)?,
+            last_status: r.get(2)?,
+            last_sync_ms: r.get(3)?,
+            failures: r.get::<_, i64>(4)? as u32,
+            circuit_until_ms: r.get(5)?,
+        })
     }
 
     fn map_ad_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdRow> {

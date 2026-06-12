@@ -12,6 +12,7 @@ mod chart;
 mod config;
 mod doctor;
 mod export;
+mod feed;
 mod install_claude;
 mod model;
 mod paths;
@@ -111,6 +112,15 @@ enum Command {
         #[arg(long)]
         plain: bool,
     },
+    /// Live status feed: the kickbacks.ai bulletin and upstream GitHub activity
+    Feed {
+        /// Render from cache only, without any network request
+        #[arg(long)]
+        offline: bool,
+        /// Output the feed as JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show whether ads are flowing right now, and why (killswitch, idle, etc.)
     Status,
     /// First-run setup: create the archive and capture once
@@ -175,6 +185,7 @@ fn main() -> Result<()> {
             chart_style,
         } => snapshot::run(width, plain, theme, chart_style),
         Command::Statusline { width, plain } => statusline::run(width, plain),
+        Command::Feed { offline, json } => feed::cli::run(offline, json),
         Command::Status => status::run(),
         Command::Setup => setup::run(),
         Command::Doctor => doctor::run(),

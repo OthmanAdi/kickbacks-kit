@@ -27,6 +27,11 @@ anyhow = "1.0"
 dirs = "5.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sha2 = "0.10"
+# Live status feed: a small blocking HTTP client (no async runtime) with rustls
+# so kb stays free of OpenSSL on every platform. Used only for read-only GETs of
+# public endpoints (GitHub API, the kickbacks.ai public status bulletin); never
+# for any billing, auth, or earnings route.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]
 strip = true

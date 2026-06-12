@@ -25,6 +25,30 @@ pub struct Config {
     /// Activity chart style for the sightings panel.
     #[serde(default)]
     pub chart_style: ChartStyle,
+    /// Live status feed settings.
+    #[serde(default)]
+    pub feed: FeedConfig,
+}
+
+/// Settings for the live status feed (the network surface).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedConfig {
+    /// When false, kb never touches the network: the feed renders from cache
+    /// only and no fetch is attempted. The headline feature is on by default,
+    /// with a clear, documented way to turn it off here, via `--offline`, or via
+    /// the `KICKBACKS_KIT_OFFLINE` environment variable.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for FeedConfig {
+    fn default() -> Self {
+        FeedConfig { enabled: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// First-run default: detect the terminal background rather than imposing a
@@ -38,6 +62,7 @@ impl Default for Config {
         Config {
             theme: default_theme(),
             chart_style: ChartStyle::default(),
+            feed: FeedConfig::default(),
         }
     }
 }
@@ -61,6 +86,16 @@ pub fn load() -> Config {
         return Config::default();
     };
     serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// Persist only the dashboard preferences (theme and chart style), preserving
+/// any other settings already on disk (such as the feed toggle). The in-TUI
+/// pickers change just these two, so they must not clobber the rest of config.
+pub fn save_prefs(theme: Theme, chart_style: ChartStyle) -> Result<()> {
+    let mut cfg = load();
+    cfg.theme = theme;
+    cfg.chart_style = chart_style;
+    save(&cfg)
 }
 
 /// Persist the config, creating the parent directory as needed. Returns an
@@ -101,14 +136,40 @@ mod tests {
         save(&Config {
             theme: Theme::Light,
             chart_style: ChartStyle::Bars,
+            feed: FeedConfig { enabled: false },
         })
         .unwrap();
         let loaded = load();
         assert_eq!(loaded.theme, Theme::Light);
         assert_eq!(loaded.chart_style, ChartStyle::Bars);
+        assert!(!loaded.feed.enabled);
 
         std::env::remove_var("KICKBACKS_KIT_CONFIG");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_prefs_preserves_feed_setting() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let file =
+            std::env::temp_dir().join(format!("kb-config-prefs-{}.json", std::process::id()));
+        std::env::set_var("KICKBACKS_KIT_CONFIG", &file);
+
+        save(&Config {
+            theme: Theme::Dark,
+            chart_style: ChartStyle::Heat,
+            feed: FeedConfig { enabled: false },
+        })
+        .unwrap();
+        // Changing only the theme must not re-enable the feed.
+        save_prefs(Theme::Light, ChartStyle::Bars).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.theme, Theme::Light);
+        assert_eq!(loaded.chart_style, ChartStyle::Bars);
+        assert!(!loaded.feed.enabled);
+
+        std::env::remove_var("KICKBACKS_KIT_CONFIG");
+        std::fs::remove_file(&file).ok();
     }
 
     #[test]
