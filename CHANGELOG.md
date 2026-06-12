@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+* A live status feed. kb now reads the kickbacks.ai service bulletin and the
+  upstream repository's public GitHub activity, and shows them in the dashboard,
+  in a new `kb feed` command, and as an alert on the status line. The feed
+  carries the maintainer's bulletin (the de facto status channel, since
+  kickbacks.ai has no status page), the extension version that was last synced,
+  the repository's stars and open issues, and recent issues, with the
+  maintainer's X channel as a link.
+* A tabbed `kb top`. A one-line tab bar switches between the ad Dashboard, the
+  Feed, and a Links view: press `1`, `2`, `3`, or `Tab`. On the Feed and Links
+  tabs `j` and `k` move the selection and `o` opens the highlighted link in a
+  browser. `r` refreshes the feed now.
+* An advertiser drill-down on the dashboard. Move the selection through the
+  leaderboard with `j` and `k` and press Enter for a card showing that
+  advertiser's creatives and a 24 hour activity strip for it alone.
+* `kb links`: export the advertiser destinations you have been shown as a table,
+  CSV, JSONL, or a self-contained HTML bookmarks page.
+* `kb report`: a one-shot digest of your archive (summary, advertiser
+  leaderboard, recent links, killswitch timeline) as Markdown or HTML.
+* `kb snapshot --tab dashboard|feed|links` renders any view to stdout, so a
+  slash command or a script can show the feed or the links, not only the
+  dashboard.
+* Two more Claude Code slash commands from `kb install-claude`: `/kbfeed` for the
+  status feed and `/kblinks` for the captured links.
+
+### Changed
+* The status line appends one alert when there is room for it: a kickbacks.ai
+  service bulletin, or a marker when a newer extension version exists than the
+  one installed. It reads the local cache only and never goes to the network, so
+  it stays fast on the host's hot path. `--no-feed` turns the alert off.
+* Extension version comparison is numeric (so 0.3.9 sorts below 0.3.10), and the
+  installed-version reader uses it, so "a newer version exists" is decided
+  correctly.
+
+### Notes
+* The feed is the only part of kb that uses the network, and only for read-only
+  requests to public endpoints: the GitHub REST API and the public kickbacks.ai
+  status bulletin (`/api/bulletin`, the same document the homepage fetches). It
+  never posts an impression, never calls a billing or auth route, and never
+  reads a balance, so the read-only invariant is intact. The network is on by
+  default and turns off three ways: the `--offline` flag, the `feed.enabled`
+  config key, or the `KICKBACKS_KIT_OFFLINE` environment variable. The status
+  line, snapshots, and the archive never fetch; they read the cache.
+* Reading the maintainer's X posts directly was evaluated and dropped. There is
+  no reliable keyless way to read X in 2026, and a fragile scrape has no place
+  in a tool whose point is being trustworthy, so the X channel is a link.
+
 ## [0.3.2]
 
 ### Added
