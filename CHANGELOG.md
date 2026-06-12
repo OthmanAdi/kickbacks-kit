@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1]
+
+### Fixed
+* The 24 hour activity chart was a wall of gray when most hours had no data.
+  Unobserved hours rendered as full-height shaded slabs, so a new install (or
+  any run with long gaps) drowned the real bars. Unobserved hours now show a
+  single dim baseline mark, and observed hours rise as gold bars scaled to the
+  busiest hour. Watched-but-quiet hours stay blank, so they still read
+  differently from hours kb was not watching.
+
 ## [0.3.0]
 
 ### Added

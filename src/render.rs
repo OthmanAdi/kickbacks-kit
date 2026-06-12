@@ -14,9 +14,7 @@ use anyhow::Result;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Sparkline, Table,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 
 use crate::archive::{AdvertiserStat, Archive, Stats};
@@ -469,12 +467,10 @@ fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         (body, None)
     };
-    let spark = Sparkline::default()
-        .data(app.sparkline.iter().copied())
-        .style(fg(pal.gold))
-        .absent_value_symbol("░")
-        .absent_value_style(fg(pal.dim));
-    frame.render_widget(spark, spark_area);
+    frame.render_widget(
+        Paragraph::new(bars(&app.sparkline, spark_area, pal)),
+        spark_area,
+    );
     if let Some(legend) = legend_area {
         let note = Paragraph::new(Line::from(Span::styled(
             "░ hours kb was not watching",
@@ -482,6 +478,63 @@ fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
         )));
         frame.render_widget(note, legend);
     }
+}
+
+/// Eighth-height block glyphs for a bar column, 1/8 (`▁`) to 8/8 (`█`).
+const BAR_BLOCKS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// Total eighths to fill for `value` against `max` in a column `rows` cells
+/// high. Any nonzero value fills at least one eighth, so a real sighting never
+/// renders as an empty column.
+fn column_eighths(value: u64, max: u64, rows: u16) -> u16 {
+    if value == 0 || max == 0 || rows == 0 {
+        return 0;
+    }
+    let total = rows as u64 * 8;
+    (value * total).div_ceil(max).clamp(1, total) as u16
+}
+
+/// The glyph for one cell, given the column's total eighths and how many rows
+/// up from the baseline the cell sits. `None` means an empty cell.
+fn bar_cell(col_eighths: u16, row_from_bottom: u16) -> Option<&'static str> {
+    let base = row_from_bottom * 8;
+    if col_eighths <= base {
+        return None;
+    }
+    let local = (col_eighths - base).min(8);
+    Some(BAR_BLOCKS[local as usize - 1])
+}
+
+/// Build the activity chart. Observed hours rise as gold bars scaled to the
+/// busiest hour; unobserved hours show a single dim baseline mark instead of a
+/// full-height shaded slab, which is what turned the old chart into a wall of
+/// gray when most hours had no data. Watched-but-quiet hours (`Some(0)`) stay
+/// blank, so they read differently from unobserved ones.
+fn bars(data: &[Option<u64>], area: Rect, pal: &Palette) -> Vec<Line<'static>> {
+    let w = (area.width as usize).min(data.len());
+    let h = area.height.max(1);
+    if w == 0 {
+        return Vec::new();
+    }
+    let visible = &data[data.len() - w..];
+    let max = visible.iter().filter_map(|v| *v).max().unwrap_or(0);
+
+    let mut lines = Vec::with_capacity(h as usize);
+    for row in (0..h).rev() {
+        let mut spans = Vec::with_capacity(w);
+        for &hour in visible {
+            match hour {
+                None if row == 0 => spans.push(Span::styled("░", fg(pal.dim))),
+                Some(v) if v > 0 => match bar_cell(column_eighths(v, max, h), row) {
+                    Some(block) => spans.push(Span::styled(block, fg(pal.gold))),
+                    None => spans.push(Span::raw(" ")),
+                },
+                _ => spans.push(Span::raw(" ")),
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
@@ -721,6 +774,42 @@ mod tests {
         };
         let out = rendered(&app);
         assert!(out.contains("not watching — run kb watch"));
+    }
+
+    #[test]
+    fn bar_height_scales_and_never_vanishes() {
+        assert_eq!(column_eighths(4, 4, 5), 40); // full value fills the column
+        assert_eq!(column_eighths(1, 1000, 5), 1); // tiny value still shows 1/8
+        assert_eq!(column_eighths(0, 4, 5), 0);
+        assert_eq!(column_eighths(4, 0, 5), 0);
+    }
+
+    #[test]
+    fn bar_cells_fill_bottom_up() {
+        // Column of 10/40 eighths: bottom cell full, next cell 2/8, rest empty.
+        assert_eq!(bar_cell(10, 0), Some("█"));
+        assert_eq!(bar_cell(10, 1), Some("▂"));
+        assert_eq!(bar_cell(10, 2), None);
+    }
+
+    #[test]
+    fn gaps_only_mark_the_baseline_not_full_height() {
+        // Mostly unobserved with one tall bar. Gap columns must show a single
+        // baseline mark, never a full-height shaded slab (the old ugliness):
+        // the shade-char count stays near one row, not rows times columns.
+        let app = App {
+            now_ms: 1,
+            sparkline: {
+                let mut d = vec![None; 24];
+                d[23] = Some(10);
+                d
+            },
+            ..App::default()
+        };
+        let text = rendered(&app);
+        assert!(text.contains("█"), "the data bar should render");
+        let shades = text.matches('░').count();
+        assert!(shades <= 30, "shade slab regression: {shades}");
     }
 
     #[test]
