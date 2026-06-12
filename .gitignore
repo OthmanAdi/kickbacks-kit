@@ -23,3 +23,9 @@ kickbacks.db*
 /CLAUDE.md
 /HANDOFF_MISSION_2.md
 /HANDOFF_MISSION_3.md
+
+# Local research corpus (private notes, never pushed)
+/research/
+
+# Local planning files (private, never pushed)
+/.planning/
