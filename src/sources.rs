@@ -7,6 +7,8 @@
 
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 use crate::model::CliAd;
 use crate::paths;
@@ -95,28 +97,45 @@ pub fn parse_log_line(line: &str) -> Option<LogEvent> {
     Some(ev)
 }
 
-/// Read lifecycle events from `debug.log`, returning only lines whose ISO
-/// timestamp is strictly greater than `after_iso` (lexical compare, which is
-/// correct for fixed-width Zulu ISO-8601). Pass `None` to read everything.
-pub fn read_events_since(after_iso: Option<&str>) -> Result<Vec<LogEvent>> {
-    let path = paths::debug_log_path()?;
+/// Lifecycle events newly appended since a byte `offset`, plus the offset to
+/// resume from next time.
+#[derive(Debug, Default)]
+pub struct LogChunk {
+    pub events: Vec<LogEvent>,
+    pub next_offset: u64,
+}
+
+/// Read lifecycle events appended to `debug.log` after byte `offset` (a value
+/// previously returned in [`LogChunk::next_offset`]; pass 0 to read all).
+/// Reads stop at the last complete line, so a partially written tail line is
+/// picked up on the next pass instead of being lost. If the file shrank below
+/// `offset` (rotation or truncation), reading restarts from the top; the
+/// archive's primary key de-duplicates any re-ingested rows.
+pub fn read_new_events(offset: u64) -> Result<LogChunk> {
+    read_new_events_at(&paths::debug_log_path()?, offset)
+}
+
+fn read_new_events_at(path: &Path, offset: u64) -> Result<LogChunk> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(LogChunk::default());
     }
-    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut out = Vec::new();
-    for line in raw.lines() {
-        if let Some(ev) = parse_log_line(line) {
-            let keep = match after_iso {
-                Some(w) => ev.ts_iso.as_str() > w,
-                None => true,
-            };
-            if keep {
-                out.push(ev);
-            }
-        }
-    }
-    Ok(out)
+    let mut f = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let len = f.metadata()?.len();
+    let start = if offset <= len { offset } else { 0 };
+    f.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    let complete = bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let text = String::from_utf8_lossy(&bytes[..complete]);
+    let events = text.lines().filter_map(parse_log_line).collect();
+    Ok(LogChunk {
+        events,
+        next_offset: start + complete as u64,
+    })
 }
 
 /// The most recent lifecycle state, used by the dashboard header.
@@ -202,11 +221,44 @@ pub fn installed_extension_version() -> Option<String> {
     versions.pop()
 }
 
-/// Fold the log into the latest known `session.state`.
+/// How far back to look in `debug.log` for the latest `session.state`. The
+/// state lines repeat every few minutes, so a 64 KiB tail always contains one
+/// on a live install; the dashboard polls this once a second and must not
+/// re-parse a log that grows without bound.
+const LIVE_TAIL_BYTES: u64 = 64 * 1024;
+
+/// Fold the log into the latest known `session.state`. Reads only the tail of
+/// the file; falls back to a full read in the rare case the tail window holds
+/// no state line.
 pub fn read_live_state() -> Result<LiveState> {
-    let events = read_events_since(None)?;
+    live_state_at(&paths::debug_log_path()?, LIVE_TAIL_BYTES)
+}
+
+fn live_state_at(path: &Path, tail_bytes: u64) -> Result<LiveState> {
+    if !path.exists() {
+        return Ok(LiveState::default());
+    }
+    let mut f = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(tail_bytes);
+    f.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    // When we seeked into the middle of the file the first line is partial.
+    let lines = text.lines().skip(usize::from(start > 0));
+    let st = fold_session_state(lines);
+    if st.last_ts_iso.is_none() && start > 0 {
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        return Ok(fold_session_state(raw.lines()));
+    }
+    Ok(st)
+}
+
+fn fold_session_state<'a>(lines: impl Iterator<Item = &'a str>) -> LiveState {
     let mut st = LiveState::default();
-    for ev in events {
+    for ev in lines.filter_map(parse_log_line) {
         if ev.name == "session.state" {
             if ev.signed_in.is_some() {
                 st.signed_in = ev.signed_in;
@@ -221,12 +273,12 @@ pub fn read_live_state() -> Result<LiveState> {
                 st.has_ad = ev.has_ad;
             }
             if ev.cc_version.is_some() {
-                st.cc_version = ev.cc_version.clone();
+                st.cc_version = ev.cc_version;
             }
-            st.last_ts_iso = Some(ev.ts_iso.clone());
+            st.last_ts_iso = Some(ev.ts_iso);
         }
     }
-    Ok(st)
+    st
 }
 
 #[cfg(test)]
@@ -267,6 +319,115 @@ mod tests {
         let ev = parse_log_line(line).unwrap();
         assert!(ev.ts_iso.as_str() > "2026-06-11T19:00:00.000Z");
         assert!(ev.ts_iso.as_str() <= "2026-06-11T20:00:00.000Z");
+    }
+
+    /// A temp log file that cleans up after itself.
+    struct TempLog(std::path::PathBuf);
+
+    impl TempLog {
+        fn new(name: &str, content: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("kb-sources-test-{}-{name}.log", std::process::id()));
+            fs::write(&p, content).unwrap();
+            Self(p)
+        }
+
+        fn append(&self, content: &str) {
+            use std::io::Write;
+            let mut f = fs::OpenOptions::new().append(true).open(&self.0).unwrap();
+            f.write_all(content.as_bytes()).unwrap();
+        }
+    }
+
+    impl Drop for TempLog {
+        fn drop(&mut self) {
+            fs::remove_file(&self.0).ok();
+        }
+    }
+
+    const LINE_A: &str = "2026-06-11T19:42:13.838Z [ext] info - a {}\n";
+    const LINE_B: &str = "2026-06-11T19:42:14.838Z [ext] info - b {}\n";
+    const STATE_LINE: &str = "2026-06-11T19:42:23.748Z [ext] info - session.state {\"signedIn\":true,\"injectionOn\":true,\"killed\":false,\"hasAd\":true,\"ccVersion\":\"2.1.173\"}\n";
+
+    #[test]
+    fn offset_read_is_incremental() {
+        let log = TempLog::new("incremental", LINE_A);
+        let c1 = read_new_events_at(&log.0, 0).unwrap();
+        assert_eq!(c1.events.len(), 1);
+        assert_eq!(c1.events[0].name, "a");
+        assert_eq!(c1.next_offset, LINE_A.len() as u64);
+
+        log.append(LINE_B);
+        let c2 = read_new_events_at(&log.0, c1.next_offset).unwrap();
+        assert_eq!(c2.events.len(), 1);
+        assert_eq!(c2.events[0].name, "b");
+        assert_eq!(c2.next_offset, (LINE_A.len() + LINE_B.len()) as u64);
+    }
+
+    #[test]
+    fn offset_holds_back_partial_tail_line() {
+        let partial = "2026-06-11T19:42:15.838Z [ext] info - c {";
+        let log = TempLog::new("partial", &format!("{LINE_A}{partial}"));
+        let c1 = read_new_events_at(&log.0, 0).unwrap();
+        // The unterminated line is not consumed; it stays for the next pass.
+        assert_eq!(c1.events.len(), 1);
+        assert_eq!(c1.next_offset, LINE_A.len() as u64);
+
+        log.append("}\n");
+        let c2 = read_new_events_at(&log.0, c1.next_offset).unwrap();
+        assert_eq!(c2.events.len(), 1);
+        assert_eq!(c2.events[0].name, "c");
+    }
+
+    #[test]
+    fn offset_resets_when_file_shrinks() {
+        let log = TempLog::new("shrink", LINE_A);
+        let c = read_new_events_at(&log.0, 10_000).unwrap();
+        assert_eq!(c.events.len(), 1);
+        assert_eq!(c.next_offset, LINE_A.len() as u64);
+    }
+
+    #[test]
+    fn live_state_reads_tail_window() {
+        let noise: String = (0..50)
+            .map(|i| {
+                format!(
+                    "2026-06-11T19:00:{:02}.000Z [ext] info - noise {{}}\n",
+                    i % 60
+                )
+            })
+            .collect();
+        let log = TempLog::new("tail", &format!("{noise}{STATE_LINE}"));
+        // Window much smaller than the file, but covering the state line.
+        let st = live_state_at(&log.0, 256).unwrap();
+        assert_eq!(st.signed_in, Some(true));
+        assert_eq!(st.killed, Some(false));
+        assert_eq!(st.cc_version.as_deref(), Some("2.1.173"));
+    }
+
+    #[test]
+    fn live_state_falls_back_to_full_read() {
+        let noise: String = (0..50)
+            .map(|i| {
+                format!(
+                    "2026-06-11T20:00:{:02}.000Z [ext] info - noise {{}}\n",
+                    i % 60
+                )
+            })
+            .collect();
+        // State line only at the very start, outside any small tail window.
+        let log = TempLog::new("fallback", &format!("{STATE_LINE}{noise}"));
+        let st = live_state_at(&log.0, 64).unwrap();
+        assert_eq!(st.signed_in, Some(true));
+        assert_eq!(st.has_ad, Some(true));
+    }
+
+    #[test]
+    fn live_state_missing_file_is_default() {
+        let p = std::env::temp_dir().join("kb-sources-test-does-not-exist.log");
+        let st = live_state_at(&p, 64).unwrap();
+        assert_eq!(st.signed_in, None);
+        assert!(st.last_ts_iso.is_none());
     }
 
     fn state(signed: bool, injection: bool, killed: bool) -> LiveState {
