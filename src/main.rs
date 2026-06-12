@@ -17,6 +17,7 @@ mod setup;
 mod snapshot;
 mod sources;
 mod status;
+mod statusline;
 /// Test-only: renders a buffer to SVG for the README hero image.
 #[cfg(test)]
 mod svg;
@@ -85,6 +86,15 @@ enum Command {
         #[arg(long)]
         plain: bool,
     },
+    /// One-line status for a CLI status bar: the current ad plus kb stats
+    Statusline {
+        /// Maximum visible columns (default: $COLUMNS or 120)
+        #[arg(long)]
+        width: Option<u16>,
+        /// Disable colors and the ad hyperlink
+        #[arg(long)]
+        plain: bool,
+    },
     /// Show whether ads are flowing right now, and why (killswitch, idle, etc.)
     Status,
     /// First-run setup: create the archive and capture once
@@ -123,6 +133,7 @@ fn main() -> Result<()> {
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),
         Command::Snapshot { width, plain } => snapshot::run(width, plain),
+        Command::Statusline { width, plain } => statusline::run(width, plain),
         Command::Status => status::run(),
         Command::Setup => setup::run(),
         Command::Doctor => doctor::run(),

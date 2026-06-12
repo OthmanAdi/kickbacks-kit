@@ -104,6 +104,10 @@ impl Archive {
             .with_context(|| format!("opening archive db: {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "foreign_keys", "ON").ok();
+        // `kb top`, `kb watch`, and `kb statusline` may all write concurrently;
+        // wait briefly instead of failing with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_millis(500))
+            .ok();
         conn.execute_batch(SCHEMA).context("running migrations")?;
         Ok(Self { conn })
     }
