@@ -10,6 +10,7 @@ mod archive;
 mod capture;
 mod doctor;
 mod export;
+mod install_claude;
 mod model;
 mod paths;
 mod render;
@@ -101,6 +102,18 @@ enum Command {
     Setup,
     /// Check local data sources and the archive
     Doctor,
+    /// Wire kb into Claude Code: /kbtop, /kbstatus, and the statusLine
+    InstallClaude {
+        /// Answer yes to all prompts
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Undo install-claude: remove the commands, restore the old statusLine
+    UninstallClaude {
+        /// Answer yes to all prompts
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -120,6 +133,10 @@ enum ArchiveCommand {
 }
 
 fn main() -> Result<()> {
+    // Piped output (slash commands, scripts) should be plain text, not ANSI.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        crossterm::style::force_color_output(false);
+    }
     let cli = Cli::parse();
     match cli.command {
         Command::Top { demo } => {
@@ -137,6 +154,8 @@ fn main() -> Result<()> {
         Command::Status => status::run(),
         Command::Setup => setup::run(),
         Command::Doctor => doctor::run(),
+        Command::InstallClaude { yes } => install_claude::install(yes),
+        Command::UninstallClaude { yes } => install_claude::uninstall(yes),
     }
 }
 
