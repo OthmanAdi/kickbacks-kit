@@ -34,6 +34,11 @@ const FRESH_MS: i64 = 600_000;
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 
+/// Where real earnings live. kb stays read-only and offline, so it points here
+/// rather than reading balances (that needs the kickbacks.ai cloud backend,
+/// which the honesty invariant keeps out of scope).
+pub const PORTFOLIO_URL: &str = "https://kickbacks.ai/me";
+
 // ---- app state ------------------------------------------------------------
 
 #[derive(Default)]
@@ -371,6 +376,22 @@ fn render_totals(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
         )));
     }
+    // Earnings deliberately live off-screen: kb never reads balances (that
+    // needs the cloud backend). Point the user to the real number instead of
+    // inventing one.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "$ earnings",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        PORTFOLIO_URL,
+        Style::default().fg(GOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "read-only · kb does not read balances",
+        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+    )));
     frame.render_widget(Paragraph::new(lines), body);
 }
 
@@ -581,6 +602,16 @@ mod tests {
         assert!(out.contains("Tailscale"));
         assert!(out.contains("demo data"));
         assert!(out.contains("TOP ADVERTISERS"));
+    }
+
+    #[test]
+    fn earnings_pointer_is_honest_not_a_number() {
+        // The dashboard must point to where earnings live, never show a
+        // fabricated balance. This guards the honesty invariant.
+        let out = rendered(&demo_app());
+        assert!(out.contains("earnings"));
+        assert!(out.contains("kickbacks.ai/me"));
+        assert!(out.contains("does not read balances"));
     }
 
     #[test]

@@ -69,6 +69,11 @@ pub fn run() -> Result<()> {
         format!("{} ads · {} sightings", s.distinct_ads, s.total_sightings),
     );
 
+    row(
+        "earnings",
+        format!("{} (kb stays read-only)", crate::render::PORTFOLIO_URL),
+    );
+
     println!();
     if status == AdStatus::Paused {
         println!(
