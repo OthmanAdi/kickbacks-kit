@@ -17,8 +17,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::archive::{AdvertiserStat, Archive, Stats};
+use crate::archive::{AdvertiserStat, Archive, LinkRow, Stats};
 use crate::chart::ChartStyle;
+use crate::feed::sync::OfflineReason;
+use crate::feed::{FeedItem, FeedKind, FeedSnapshot};
 use crate::model::{host_of, AdRow, CliAd};
 use crate::sources::{self, LiveState};
 use crate::theme::{Palette, Theme};
@@ -75,6 +77,43 @@ impl ThemePicker {
     }
 }
 
+/// Which top-level view is showing. The tab bar cycles through these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Tab {
+    /// The ad stats dashboard (the original `kb top` view).
+    #[default]
+    Dashboard,
+    /// The live status feed: bulletin, version, issues, links.
+    Feed,
+    /// Openable advertiser links captured from the ad archive.
+    Links,
+}
+
+impl Tab {
+    /// Tabs in display order.
+    pub fn all() -> [Tab; 3] {
+        [Tab::Dashboard, Tab::Feed, Tab::Links]
+    }
+
+    /// Short label for the tab bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Dashboard => "Dashboard",
+            Tab::Feed => "Feed",
+            Tab::Links => "Links",
+        }
+    }
+
+    /// The next/previous tab, wrapping, for Tab / BackTab cycling.
+    pub fn cycle(self, forward: bool) -> Tab {
+        let all = Tab::all();
+        let i = all.iter().position(|&t| t == self).unwrap_or(0);
+        let n = all.len();
+        let j = if forward { i + 1 } else { i + n - 1 } % n;
+        all[j]
+    }
+}
+
 #[derive(Default)]
 pub struct App {
     pub now_ms: i64,
@@ -94,6 +133,20 @@ pub struct App {
     pub chart_style: ChartStyle,
     /// Some while the theme picker overlay is open.
     pub picker: Option<ThemePicker>,
+    /// The active top-level tab.
+    pub tab: Tab,
+    /// The cached status feed (refreshed by a background thread).
+    pub feed: FeedSnapshot,
+    /// Selected row in the Feed tab.
+    pub feed_cursor: usize,
+    /// Openable advertiser links for the Links tab.
+    pub links: Vec<LinkRow>,
+    /// Selected row in the Links tab.
+    pub links_cursor: usize,
+    /// True while a feed fetch is in flight (drives the sync indicator).
+    pub fetching: bool,
+    /// Why the feed is offline this run, if it is (drives the status line).
+    pub offline: Option<OfflineReason>,
 }
 
 impl App {
@@ -119,7 +172,57 @@ impl App {
         self.sparkline = archive.hourly_activity(now_ms, 24)?;
         self.leaderboard = archive.advertiser_leaderboard(8)?;
         self.recent = archive.list_ads(8)?;
+        self.links = archive.distinct_links(50).unwrap_or_default();
+        self.clamp_cursors();
         Ok(())
+    }
+
+    /// Number of selectable rows in the active tab's list.
+    fn row_count(&self) -> usize {
+        match self.tab {
+            Tab::Dashboard => 0,
+            Tab::Feed => self.feed.ordered().len(),
+            Tab::Links => self.links.len(),
+        }
+    }
+
+    /// Keep the cursors inside their lists as data changes underneath them.
+    pub fn clamp_cursors(&mut self) {
+        let feed_len = self.feed.ordered().len();
+        self.feed_cursor = self.feed_cursor.min(feed_len.saturating_sub(1));
+        self.links_cursor = self.links_cursor.min(self.links.len().saturating_sub(1));
+    }
+
+    /// Move the active tab's selection by `delta` rows, saturating at the ends.
+    pub fn move_cursor(&mut self, down: bool) {
+        let n = self.row_count();
+        if n == 0 {
+            return;
+        }
+        let cur = match self.tab {
+            Tab::Feed => &mut self.feed_cursor,
+            Tab::Links => &mut self.links_cursor,
+            Tab::Dashboard => return,
+        };
+        if down {
+            *cur = (*cur + 1).min(n - 1);
+        } else {
+            *cur = cur.saturating_sub(1);
+        }
+    }
+
+    /// The URL the current selection points at, if any (for opening in a
+    /// browser). Returns `None` on the dashboard or an empty list.
+    pub fn selected_url(&self) -> Option<String> {
+        match self.tab {
+            Tab::Dashboard => None,
+            Tab::Feed => self
+                .feed
+                .ordered()
+                .get(self.feed_cursor)
+                .and_then(|i| i.url.clone()),
+            Tab::Links => self.links.get(self.links_cursor).map(|l| l.url.clone()),
+        }
     }
 }
 
@@ -215,7 +318,70 @@ pub fn demo_app() -> App {
         icon_ref: None,
         ts: DEMO_NOW_MS - 12_000,
     });
+    app.feed = demo_feed();
+    app.offline = None;
     app
+}
+
+/// Representative feed for the demo and the README hero, built through the same
+/// `FeedItem` constructor as live data so it cannot drift in shape.
+fn demo_feed() -> FeedSnapshot {
+    use crate::feed::SourceHealth;
+    let m = 60_000;
+    let items = vec![
+        FeedItem::new(
+            FeedKind::Bulletin,
+            "A bot army is attacking us. We're winning.",
+            "Stripe payouts coming within 48h  ·  Codex paused while we mop up  ·  earnings are safe, bot traffic never pays out",
+            Some("https://kickbacks.ai/".into()),
+            None,
+            "bulletin",
+        ),
+        FeedItem::new(
+            FeedKind::Version,
+            "Extension synced to v0.3.174",
+            "kickbacks.ai VS Code extension",
+            Some("https://github.com/andrewmccalip/kickbacks.ai/commits/main".into()),
+            Some(DEMO_NOW_MS - 5 * 60 * m),
+            "github",
+        ),
+        FeedItem::new(
+            FeedKind::Stat,
+            "kickbacks.ai on GitHub",
+            "158 stars · 33 forks · 47 open items",
+            Some("https://github.com/andrewmccalip/kickbacks.ai".into()),
+            Some(DEMO_NOW_MS - 13 * 60 * m),
+            "github",
+        ),
+        FeedItem::new(
+            FeedKind::Issue,
+            "#52 Displays ads but no kickback earned",
+            "open issue on kickbacks.ai",
+            Some("https://github.com/andrewmccalip/kickbacks.ai/issues/52".into()),
+            Some(DEMO_NOW_MS - 47 * m),
+            "github",
+        ),
+    ];
+    let sources = vec![
+        SourceHealth {
+            source: "bulletin".into(),
+            last_status: "ok".into(),
+            last_sync_ms: Some(DEMO_NOW_MS - 2 * m),
+            ..Default::default()
+        },
+        SourceHealth {
+            source: "github_repo".into(),
+            last_status: "ok".into(),
+            last_sync_ms: Some(DEMO_NOW_MS - 2 * m),
+            ..Default::default()
+        },
+    ];
+    FeedSnapshot {
+        items,
+        sources,
+        last_sync_ms: Some(DEMO_NOW_MS - 2 * m),
+        offline: false,
+    }
 }
 
 // ---- rendering ------------------------------------------------------------
@@ -253,22 +419,56 @@ pub fn ui(frame: &mut Frame, app: &App) {
         .padding(Padding::new(1, 1, 0, 0))
         .title_top(brand_title(pal, app.demo))
         .title_top(status_chips(pal, &app.live).right_aligned())
-        .title_bottom(keybinds_line(pal, app.theme, app.chart_style))
+        .title_bottom(keybinds_line(pal, app))
         .title_bottom(ethic_line(pal).right_aligned());
 
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let columns = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .spacing(1)
-        .split(inner);
+    // A one-line tab bar, then the active view fills the rest.
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+    frame.render_widget(Paragraph::new(tab_bar(pal, app)), rows[0]);
+    let content = rows[1];
 
-    render_left(frame, columns[0], app);
-    render_right(frame, columns[1], app);
+    match app.tab {
+        Tab::Dashboard => render_dashboard(frame, content, app),
+        Tab::Feed => render_feed(frame, content, app),
+        Tab::Links => render_links(frame, content, app),
+    }
 
     if app.picker.is_some() {
         render_theme_picker(frame, area, app);
     }
+}
+
+/// The tab bar: each tab name, the active one in gold, with a right-aligned
+/// sync indicator so the user can always see the feed's network state.
+fn tab_bar(pal: &Palette, app: &App) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, tab) in Tab::all().iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", fg(pal.dim)));
+        }
+        let n = i + 1;
+        if *tab == app.tab {
+            spans.push(Span::styled(
+                format!("{n} {}", tab.label()),
+                fg(pal.gold).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(format!("{n} {}", tab.label()), fg(pal.dim)));
+        }
+    }
+    Line::from(spans)
+}
+
+/// The original two-column ad dashboard.
+fn render_dashboard(frame: &mut Frame, area: Rect, app: &App) {
+    let columns = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .spacing(1)
+        .split(area);
+    render_left(frame, columns[0], app);
+    render_right(frame, columns[1], app);
 }
 
 fn brand_title(pal: &Palette, demo: bool) -> Line<'static> {
@@ -309,17 +509,35 @@ fn chip(pal: &Palette, on: bool, yes: &str, no: &str) -> Span<'static> {
     }
 }
 
-fn keybinds_line(pal: &Palette, theme: Theme, chart: ChartStyle) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(" q ", fg(pal.gold)),
-        Span::styled("quit  ", fg(pal.dim)),
-        Span::styled("r ", fg(pal.gold)),
-        Span::styled("refresh  ", fg(pal.dim)),
-        Span::styled("t ", fg(pal.gold)),
-        Span::styled(format!("theme: {}  ", theme.label()), fg(pal.dim)),
-        Span::styled("c ", fg(pal.gold)),
-        Span::styled(format!("chart: {} ", chart.label()), fg(pal.dim)),
-    ])
+/// The bottom keybind hint line, tailored to the active tab so it only ever
+/// advertises keys that do something here.
+fn keybinds_line(pal: &Palette, app: &App) -> Line<'static> {
+    let key = |k: &'static str| Span::styled(k, fg(pal.gold));
+    let txt = |t: String| Span::styled(t, fg(pal.dim));
+    let mut spans = vec![
+        Span::raw(" "),
+        key("q "),
+        txt("quit  ".into()),
+        key("Tab "),
+        txt("views  ".into()),
+    ];
+    match app.tab {
+        Tab::Dashboard => {
+            spans.push(key("t "));
+            spans.push(txt(format!("theme: {}  ", app.theme.label())));
+            spans.push(key("c "));
+            spans.push(txt(format!("chart: {} ", app.chart_style.label())));
+        }
+        Tab::Feed | Tab::Links => {
+            spans.push(key("j/k "));
+            spans.push(txt("move  ".into()));
+            spans.push(key("o "));
+            spans.push(txt("open  ".into()));
+            spans.push(key("r "));
+            spans.push(txt("refresh ".into()));
+        }
+    }
+    Line::from(spans)
 }
 
 fn ethic_line(pal: &Palette) -> Line<'static> {
@@ -726,6 +944,232 @@ fn empty_hint(pal: &Palette) -> Paragraph<'static> {
         "nothing captured yet",
         fg(pal.dim),
     )))
+}
+
+// ---- feed tab -------------------------------------------------------------
+
+/// The glyph color for a feed item kind.
+fn kind_color(pal: &Palette, kind: FeedKind) -> Color {
+    match kind {
+        FeedKind::Bulletin => pal.gold,
+        FeedKind::Version => pal.teal,
+        FeedKind::Issue => pal.dim,
+        FeedKind::Stat => pal.gold,
+        FeedKind::Link => pal.teal,
+    }
+}
+
+/// First visible index so that `cursor` stays on screen, given how many rows
+/// fit. A pure helper so the scroll math is unit tested.
+fn window_start(cursor: usize, per_screen: usize, len: usize) -> usize {
+    if per_screen == 0 || len <= per_screen {
+        return 0;
+    }
+    let max_start = len - per_screen;
+    if cursor < per_screen {
+        0
+    } else {
+        (cursor + 1 - per_screen).min(max_start)
+    }
+}
+
+/// The live status feed: a scrollable list of items, with a network-state
+/// footer that always tells the user when kb last reached the sources.
+fn render_feed(frame: &mut Frame, area: Rect, app: &App) {
+    let pal = &app.palette;
+    let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    let (list_area, footer_area) = (parts[0], parts[1]);
+
+    let items = app.feed.ordered();
+    if items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no feed items yet — kb is fetching the status feed",
+                fg(pal.dim),
+            ))),
+            list_area,
+        );
+        frame.render_widget(Paragraph::new(feed_footer(pal, app)), footer_area);
+        return;
+    }
+
+    let width = list_area.width as usize;
+    // Each item takes two content lines plus a blank separator.
+    let rows_per_item = 3usize;
+    let per_screen = (list_area.height as usize / rows_per_item).max(1);
+    let start = window_start(app.feed_cursor, per_screen, items.len());
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, item) in items.iter().enumerate().skip(start).take(per_screen) {
+        let selected = idx == app.feed_cursor;
+        lines.extend(feed_item_lines(item, selected, width, app.now_ms, pal));
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(Paragraph::new(feed_footer(pal, app)), footer_area);
+}
+
+/// Render one feed item as two lines: a marker + glyph + title with a
+/// right-aligned age, then an indented dim detail line.
+fn feed_item_lines(
+    item: &FeedItem,
+    selected: bool,
+    width: usize,
+    now_ms: i64,
+    pal: &Palette,
+) -> Vec<Line<'static>> {
+    let marker = if selected { "▌ " } else { "  " };
+    let age = item
+        .ts_ms
+        .map(|t| util::human_age_short(now_ms - t))
+        .unwrap_or_default();
+    let glyph = item.kind.glyph();
+
+    let title_style = match item.kind {
+        FeedKind::Bulletin => fg(pal.gold).add_modifier(Modifier::BOLD),
+        _ if selected => fg(pal.fg).add_modifier(Modifier::BOLD),
+        _ => fg(pal.fg),
+    };
+
+    // marker(2) + glyph(1) + space(1) + title + pad + age
+    let fixed = marker.chars().count() + 2 + age.chars().count() + 1;
+    let title_budget = width.saturating_sub(fixed).max(8);
+    let title = util::truncate(&item.title, title_budget);
+    let used = marker.chars().count() + 2 + title.chars().count() + age.chars().count();
+    let pad = " ".repeat(width.saturating_sub(used).max(1));
+
+    let line1 = Line::from(vec![
+        Span::styled(marker, fg(pal.gold)),
+        Span::styled(format!("{glyph} "), fg(kind_color(pal, item.kind))),
+        Span::styled(title, title_style),
+        Span::raw(pad),
+        Span::styled(age, fg(pal.dim)),
+    ]);
+
+    // Detail: the body if present, else the destination host.
+    let detail = if item.body.is_empty() {
+        item.url.as_deref().and_then(host_of).unwrap_or_default()
+    } else {
+        item.body.clone()
+    };
+    let detail = util::truncate(&detail, width.saturating_sub(4).max(4));
+    let line2 = Line::from(vec![Span::raw("    "), Span::styled(detail, fg(pal.dim))]);
+
+    vec![line1, line2]
+}
+
+/// The one-line network-state footer under the feed: the transparency contract.
+fn feed_footer(pal: &Palette, app: &App) -> Line<'static> {
+    if let Some(reason) = app.offline {
+        let why = match reason {
+            OfflineReason::Flag => "offline (--offline)",
+            OfflineReason::Config => "offline (feed off in config)",
+            OfflineReason::Env => "offline (KICKBACKS_KIT_OFFLINE)",
+        };
+        return Line::from(Span::styled(
+            format!("{why} · showing cached feed"),
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
+        ));
+    }
+    if app.fetching {
+        return Line::from(vec![
+            Span::styled("⠿ syncing", fg(pal.gold)),
+            Span::styled(" · live status from GitHub + kickbacks.ai", fg(pal.dim)),
+        ]);
+    }
+    let synced = match app.feed.last_sync_ms {
+        Some(ms) => format!("synced {}", util::human_age(app.now_ms - ms)),
+        None => "not synced yet".to_string(),
+    };
+    // Compact per-source health, skipping the static pseudo-source.
+    let health: Vec<String> = app
+        .feed
+        .sources
+        .iter()
+        .filter(|s| s.source != "static" && !s.last_status.is_empty())
+        .map(|s| format!("{} {}", short_source(&s.source), s.last_status))
+        .collect();
+    let mut spans = vec![Span::styled(synced, fg(pal.green))];
+    if !health.is_empty() {
+        spans.push(Span::styled(
+            format!("  ·  {}", health.join(" · ")),
+            fg(pal.dim),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Shorten a source key for the compact footer.
+fn short_source(source: &str) -> &str {
+    match source {
+        "github_repo" => "repo",
+        "github_issues" => "issues",
+        "github_version" => "version",
+        other => other,
+    }
+}
+
+// ---- links tab ------------------------------------------------------------
+
+/// The Links tab: every distinct advertiser destination captured, openable.
+fn render_links(frame: &mut Frame, area: Rect, app: &App) {
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "ADVERTISER LINKS · open with o");
+    if app.links.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no advertiser links captured yet",
+                fg(pal.dim),
+            ))),
+            body,
+        );
+        return;
+    }
+    let width = body.width as usize;
+    let per_screen = (body.height as usize).max(1);
+    let start = window_start(app.links_cursor, per_screen, app.links.len());
+
+    let lines: Vec<Line> = app
+        .links
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(per_screen)
+        .map(|(idx, link)| link_line(link, idx == app.links_cursor, width, app.now_ms, pal))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+/// One link row: marker + advertiser + host + sighting count + age.
+fn link_line(
+    link: &LinkRow,
+    selected: bool,
+    width: usize,
+    now_ms: i64,
+    pal: &Palette,
+) -> Line<'static> {
+    let marker = if selected { "▌ " } else { "  " };
+    let host = host_of(&link.url).unwrap_or_else(|| link.url.clone());
+    let age = util::human_age_short(now_ms - link.last_seen_ms);
+    let meta = format!("{host}  {}x  {age}", link.times_seen);
+
+    let name_style = if selected {
+        fg(pal.gold).add_modifier(Modifier::BOLD)
+    } else {
+        fg(pal.fg)
+    };
+    let fixed = marker.chars().count() + meta.chars().count() + 2;
+    let name_budget = width.saturating_sub(fixed).max(6);
+    let name = util::truncate(&link.advertiser, name_budget);
+    let used = marker.chars().count() + name.chars().count() + meta.chars().count();
+    let pad = " ".repeat(width.saturating_sub(used).max(2));
+
+    Line::from(vec![
+        Span::styled(marker, fg(pal.gold)),
+        Span::styled(name, name_style),
+        Span::raw(pad),
+        Span::styled(meta, fg(pal.dim)),
+    ])
 }
 
 /// A centered rect of the given size, clamped to `area`.

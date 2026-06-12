@@ -102,6 +102,9 @@ enum Command {
         /// Activity chart style: heat (calendar strip) or bars
         #[arg(long, value_enum)]
         chart_style: Option<chart::ChartStyle>,
+        /// Which view to render: dashboard (default), feed, or links
+        #[arg(long, value_enum)]
+        tab: Option<render::Tab>,
     },
     /// One-line status for a CLI status bar: the current ad plus kb stats
     Statusline {
@@ -183,7 +186,8 @@ fn main() -> Result<()> {
             plain,
             theme,
             chart_style,
-        } => snapshot::run(width, plain, theme, chart_style),
+            tab,
+        } => snapshot::run(width, plain, theme, chart_style, tab),
         Command::Statusline { width, plain } => statusline::run(width, plain),
         Command::Feed { offline, json } => feed::cli::run(offline, json),
         Command::Status => status::run(),

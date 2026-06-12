@@ -32,6 +32,10 @@ sha2 = "0.10"
 # public endpoints (GitHub API, the kickbacks.ai public status bulletin); never
 # for any billing, auth, or earnings route.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Open a feed link in the user's browser from the TUI. Uses ShellExecuteW on
+# Windows (no cmd.exe, so a `&` in a URL is safe) and the platform opener
+# elsewhere; the hardened feature refuses non-http(s) URLs.
+webbrowser = { version = "1", default-features = false, features = ["hardened"] }
 
 [profile.release]
 strip = true

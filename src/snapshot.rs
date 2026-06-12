@@ -15,8 +15,9 @@ use crate::archive::Archive;
 use crate::capture::capture_pass;
 use crate::chart::ChartStyle;
 use crate::config;
+use crate::feed::sync;
 use crate::paths;
-use crate::render::{ui, App};
+use crate::render::{ui, App, Tab};
 use crate::theme::Theme;
 
 const DEFAULT_WIDTH: u16 = 100;
@@ -32,6 +33,7 @@ pub fn run(
     plain: bool,
     theme_arg: Option<Theme>,
     chart_arg: Option<ChartStyle>,
+    tab: Option<Tab>,
 ) -> Result<()> {
     let mut archive = Archive::open(&paths::db_path()?)?;
     capture_pass(&mut archive)?;
@@ -39,7 +41,13 @@ pub fn run(
     let mut app = App::default();
     app.set_theme(theme_arg.unwrap_or(cfg.theme));
     app.chart_style = chart_arg.unwrap_or(cfg.chart_style);
+    app.tab = tab.unwrap_or(Tab::Dashboard);
     app.refresh(&archive)?;
+    // A snapshot never fetches; it shows the feed the background last cached and
+    // when it was synced. Only a config/env opt-out is surfaced as "offline".
+    app.offline = sync::offline_reason(false, &cfg);
+    app.feed = sync::read_cached(&archive, app.offline.is_some());
+    app.clamp_cursors();
 
     let width = width
         .or_else(|| crossterm::terminal::size().ok().map(|(w, _)| w))

@@ -111,6 +111,15 @@ pub struct AdvertiserStat {
     pub sightings: i64,
 }
 
+/// One openable advertiser link, deduplicated by destination URL.
+#[derive(Debug, Clone)]
+pub struct LinkRow {
+    pub advertiser: String,
+    pub url: String,
+    pub last_seen_ms: i64,
+    pub times_seen: i64,
+}
+
 /// Result of a single capture pass.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureReport {
@@ -317,6 +326,31 @@ impl Archive {
         )?;
         let rows = stmt
             .query_map([], Self::map_ad_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Distinct advertiser links, most recently seen first, deduplicated by
+    /// destination URL. One row per place you could click through to, with the
+    /// advertiser name and how many sightings carried that link.
+    pub fn distinct_links(&self, limit: usize) -> Result<Vec<LinkRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT advertiser, click_url, MAX(last_seen_ms) AS seen, SUM(times_seen) AS n
+             FROM ads
+             WHERE click_url IS NOT NULL AND click_url <> ''
+             GROUP BY click_url
+             ORDER BY seen DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok(LinkRow {
+                    advertiser: r.get(0)?,
+                    url: r.get(1)?,
+                    last_seen_ms: r.get(2)?,
+                    times_seen: r.get(3)?,
+                })
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

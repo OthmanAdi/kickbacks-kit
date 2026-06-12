@@ -74,6 +74,20 @@ impl FeedKind {
             FeedKind::Link => "→",
         }
     }
+
+    /// Display priority (lower sorts first). This is a status feed, so the
+    /// reader wants the official bulletin, then which version they are on, then
+    /// repo health, before the issue stream and the static links. Recency
+    /// orders items within a single kind.
+    fn priority(self) -> u8 {
+        match self {
+            FeedKind::Bulletin => 0,
+            FeedKind::Version => 1,
+            FeedKind::Stat => 2,
+            FeedKind::Issue => 3,
+            FeedKind::Link => 4,
+        }
+    }
 }
 
 /// One entry in the feed. `title` and `body` are always sanitized of control
@@ -158,13 +172,13 @@ pub struct FeedSnapshot {
 }
 
 impl FeedSnapshot {
-    /// Items ordered for display: bulletins first (loudest, newest within),
-    /// then everything else newest first. A missing `ts_ms` sorts oldest.
+    /// Items ordered for display: by kind priority (bulletin, version, repo
+    /// stats, issues, links), then newest first within a kind. A missing
+    /// `ts_ms` sorts oldest.
     pub fn ordered(&self) -> Vec<&FeedItem> {
         let mut out: Vec<&FeedItem> = self.items.iter().collect();
         out.sort_by(|a, b| {
-            let pin = |k: FeedKind| if k == FeedKind::Bulletin { 0 } else { 1 };
-            pin(a.kind).cmp(&pin(b.kind)).then(
+            a.kind.priority().cmp(&b.kind.priority()).then(
                 b.ts_ms
                     .unwrap_or(i64::MIN)
                     .cmp(&a.ts_ms.unwrap_or(i64::MIN)),
