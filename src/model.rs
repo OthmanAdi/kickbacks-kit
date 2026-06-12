@@ -39,19 +39,29 @@ impl CliAd {
         s
     }
 
-    /// Best-effort advertiser name. Creatives follow the pattern
-    /// "Advertiser <sep> tagline", where the separator is a middot, an em or en
-    /// dash, or a spaced hyphen. We take the head when it looks like a name (a
-    /// few words at most); otherwise we fall back to the click_url host.
-    pub fn advertiser(&self) -> String {
+    /// Split the creative into (advertiser head, tagline tail). Creatives
+    /// follow the pattern "Advertiser <sep> tagline", where the separator is a
+    /// middot, an em or en dash, or a spaced hyphen. The head only counts when
+    /// it looks like a name (a few words at most). Single source of truth for
+    /// both `advertiser()` and `tagline()` so they can never disagree.
+    fn split_creative(&self) -> Option<(&str, &str)> {
         const SEPARATORS: [&str; 4] = [" · ", " — ", " – ", " - "];
         for sep in SEPARATORS {
-            if let Some((head, _)) = self.ad_text.split_once(sep) {
+            if let Some((head, tail)) = self.ad_text.split_once(sep) {
                 let head = head.trim();
                 if !head.is_empty() && head.split_whitespace().count() <= 4 {
-                    return head.to_string();
+                    return Some((head, tail.trim()));
                 }
             }
+        }
+        None
+    }
+
+    /// Best-effort advertiser name: the creative's head when it looks like a
+    /// name, otherwise the click_url host.
+    pub fn advertiser(&self) -> String {
+        if let Some((head, _)) = self.split_creative() {
+            return head.to_string();
         }
         if let Some(url) = &self.click_url {
             if let Some(host) = host_of(url) {
@@ -59,6 +69,15 @@ impl CliAd {
             }
         }
         "unknown".to_string()
+    }
+
+    /// The tagline after the advertiser separator, or the full creative text
+    /// when no separator matches.
+    pub fn tagline(&self) -> String {
+        match self.split_creative() {
+            Some((_, tail)) if !tail.is_empty() => tail.to_string(),
+            _ => self.ad_text.clone(),
+        }
     }
 }
 
@@ -142,6 +161,32 @@ mod tests {
     #[test]
     fn advertiser_unknown_without_url() {
         assert_eq!(ad("just some text", None).advertiser(), "unknown");
+    }
+
+    #[test]
+    fn tagline_from_each_separator() {
+        assert_eq!(
+            ad("Tailscale · the VPN that disappears", None).tagline(),
+            "the VPN that disappears"
+        );
+        assert_eq!(
+            ad("Solo - a better place to run your agents", None).tagline(),
+            "a better place to run your agents"
+        );
+        assert_eq!(
+            ad("Ramp — business cards that close themselves", None).tagline(),
+            "business cards that close themselves"
+        );
+    }
+
+    #[test]
+    fn tagline_falls_back_to_full_text() {
+        // No name-like head: the whole creative is the tagline.
+        assert_eq!(ad("just some text", None).tagline(), "just some text");
+        assert_eq!(
+            ad("this is a long sentence - with a dash", None).tagline(),
+            "this is a long sentence - with a dash"
+        );
     }
 
     #[test]

@@ -384,11 +384,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     let lines = match (&app.current, fresh) {
         (Some(ad), true) => {
             let advertiser = ad.advertiser();
-            let tagline = ad
-                .ad_text
-                .split_once(" · ")
-                .map(|(_, t)| t.to_string())
-                .unwrap_or_else(|| ad.ad_text.clone());
+            let tagline = ad.tagline();
             let host = ad
                 .click_url
                 .as_deref()
