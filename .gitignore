@@ -19,5 +19,6 @@ kickbacks.db*
 .vscode/
 .idea/
 
-# Local project rules (private, not for the public repo)
+# Local project rules and handoffs (private, not for the public repo)
 /CLAUDE.md
+/HANDOFF_MISSION_2.md
