@@ -95,6 +95,34 @@ pub fn sanitize_text(s: &str) -> String {
     out
 }
 
+/// Minimal RFC-4180 CSV field quoting: wrap the value in quotes and double any
+/// internal quotes when it contains a comma, quote, carriage return, or
+/// newline. Shared by every command that writes CSV.
+pub fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Escape the five characters that matter in HTML text and attribute values, so
+/// captured ad text and URLs cannot inject markup into a generated report.
+pub fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Truncate a string to `max` display columns, appending `…` when cut.
 /// Counts `char`s (good enough for the Latin + punctuation creatives here).
 pub fn truncate(s: &str, max: usize) -> String {

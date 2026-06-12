@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use crate::archive::Archive;
 use crate::paths;
+use crate::util::csv_field;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum Format {
@@ -62,13 +63,4 @@ pub fn run(format: Format, out: Option<PathBuf>) -> Result<()> {
         eprintln!("exported {} ads -> {}", ads.len(), p.display());
     }
     Ok(())
-}
-
-/// Minimal RFC-4180 CSV quoting.
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
 }

@@ -14,9 +14,11 @@ mod doctor;
 mod export;
 mod feed;
 mod install_claude;
+mod links;
 mod model;
 mod paths;
 mod render;
+mod report;
 mod setup;
 mod snapshot;
 mod sources;
@@ -84,6 +86,24 @@ enum Command {
         /// Output format
         #[arg(long, value_enum, default_value_t = export::Format::Jsonl)]
         format: export::Format,
+        /// Output file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Export the advertiser links you have seen (table, CSV, JSONL, or HTML)
+    Links {
+        /// Output format
+        #[arg(long, value_enum, default_value_t = links::Format::Table)]
+        format: links::Format,
+        /// Output file (default: stdout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Write a digest report of your archive as Markdown or HTML
+    Report {
+        /// Output format
+        #[arg(long, value_enum, default_value_t = report::Format::Md)]
+        format: report::Format,
         /// Output file (default: stdout)
         #[arg(long)]
         out: Option<PathBuf>,
@@ -181,6 +201,8 @@ fn main() -> Result<()> {
         Command::Watch { interval, once } => watch::run(interval, once),
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),
+        Command::Links { format, out } => links::run(format, out),
+        Command::Report { format, out } => report::run(format, out),
         Command::Snapshot {
             width,
             plain,
