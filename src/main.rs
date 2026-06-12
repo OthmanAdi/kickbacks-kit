@@ -14,6 +14,7 @@ mod model;
 mod paths;
 mod setup;
 mod sources;
+mod status;
 /// Test-only: renders a buffer to SVG for the README hero image.
 #[cfg(test)]
 mod svg;
@@ -73,6 +74,8 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Show whether ads are flowing right now, and why (killswitch, idle, etc.)
+    Status,
     /// First-run setup: create the archive and capture once
     Setup,
     /// Check local data sources and the archive
@@ -108,6 +111,7 @@ fn main() -> Result<()> {
         Command::Watch { interval, once } => watch::run(interval, once),
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),
+        Command::Status => status::run(),
         Command::Setup => setup::run(),
         Command::Doctor => doctor::run(),
     }

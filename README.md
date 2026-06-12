@@ -71,6 +71,7 @@ cargo build --release
 ```bash
 kb top --demo # see the dashboard right now, with sample data
 kb setup      # create the archive and capture once
+kb status     # are ads flowing right now, and if not, why
 kb doctor     # confirm the extension files and archive are wired up
 kb top        # live dashboard (also captures while open)
 kb watch      # headless capture in a spare terminal
@@ -85,6 +86,7 @@ recorded once. Polling fast never double counts.
 | :------ | :----------- |
 | `kb top` | Live TUI dashboard. Captures on every tick. |
 | `kb top --demo` | Render the dashboard with sample data. No archive, no writes. |
+| `kb status` | Whether ads are flowing now, and why not (killswitch, idle, signed out). |
 | `kb watch [--interval N] [--once]` | Headless capture loop. Default poll is 3 seconds. |
 | `kb archive stats` | Summary: ads seen, advertisers, sightings, today, this week. |
 | `kb archive list [--limit N]` | Captured ads, most recent first. |
@@ -119,7 +121,31 @@ It never leaves your machine. `kb export` hands it back to you as JSONL or CSV
 whenever you want it. Override the location with `KICKBACKS_KIT_DB`, and point the
 reader at a different artifact directory with `KICKBACKS_VIBE_DIR`.
 
+## Status and the killswitch
+
+kickbacks.ai can pause ads server-side with a killswitch. When that happens, the
+extension keeps running but no ads show, which looks like something on your end
+broke. `kb status` reads the extension's own last reported state and tells you
+plainly:
+
+```
+ads  ● PAUSED (kickbacks killswitch active)
+```
+
+`kb top` shows the same thing as a red "ADS PAUSED" banner. The state comes from
+the extension log, so reload the VS Code window if you want it refreshed.
+
+kickbacks.ai does not publish a status page. The maintainer posts outages and
+"we're back" notes on X: [@andrewmccalip](https://x.com/andrewmccalip). That, plus
+`kb status`, is the most honest read available.
+
 ## FAQ
+
+**Why did ads suddenly stop showing?**
+Usually the kickbacks.ai killswitch, which pauses ads on their side (for example
+during a backend outage). Run `kb status`: if it says PAUSED, it is not your setup
+and you cannot override it. If it says IDLE, just start a Claude Code task so a
+spinner runs.
 
 **What is kickbacks-kit?**
 A small Rust command line tool that archives the ads the kickbacks.ai extension

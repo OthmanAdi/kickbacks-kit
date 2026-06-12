@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3]
+
+### Added
+* `kb status`: an honest, local read of whether ads are flowing now, and why not
+  (killswitch, idle, signed out, injection off), plus the current ad, Claude Code
+  and extension versions, and archive totals.
+* `kb top` shows a red "ADS PAUSED" banner when the kickbacks.ai killswitch is
+  active, and `kb doctor` gained an "ads status" line.
+* Documented that kickbacks.ai has no status page; the maintainer posts outages
+  on X (@andrewmccalip).
+
 ## [0.1.2]
 
 ### Fixed

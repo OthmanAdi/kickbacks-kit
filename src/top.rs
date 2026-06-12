@@ -361,6 +361,26 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         .map(|a| app.now_ms - a.ts <= FRESH_MS)
         .unwrap_or(false);
 
+    // Killswitch is the surprising state: make it impossible to miss.
+    if app.live.killed.unwrap_or(false) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "● ADS PAUSED",
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "kickbacks killswitch active",
+                Style::default().fg(RED),
+            )),
+            Line::from(Span::styled(
+                "server-side, not you",
+                Style::default().fg(DIM),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines), body);
+        return;
+    }
+
     let lines = match (&app.current, fresh) {
         (Some(ad), true) => {
             let advertiser = ad.advertiser();

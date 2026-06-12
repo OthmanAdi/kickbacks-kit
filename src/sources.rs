@@ -130,6 +130,78 @@ pub struct LiveState {
     pub last_ts_iso: Option<String>,
 }
 
+/// Why ads are or are not showing, derived purely from local signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdStatus {
+    /// Not signed in, so nothing accrues.
+    SignedOut,
+    /// kickbacks.ai killswitch is active (server-side pause).
+    Paused,
+    /// Ad injection is switched off locally.
+    InjectionOff,
+    /// An ad is being served right now.
+    Live,
+    /// Signed in and enabled, but no active session is rendering an ad.
+    Idle,
+}
+
+impl AdStatus {
+    /// Short human label.
+    pub fn label(self) -> &'static str {
+        match self {
+            AdStatus::SignedOut => "SIGNED OUT",
+            AdStatus::Paused => "PAUSED (kickbacks killswitch active)",
+            AdStatus::InjectionOff => "OFF (ad injection disabled)",
+            AdStatus::Live => "LIVE (ad showing now)",
+            AdStatus::Idle => "IDLE (no active Claude Code session)",
+        }
+    }
+
+    /// True when ads are actually flowing.
+    pub fn is_live(self) -> bool {
+        matches!(self, AdStatus::Live)
+    }
+}
+
+/// Decide the ad status from the latest lifecycle state and whether the current
+/// ad file is fresh. Pure, so it is unit tested. `killed` takes priority over
+/// everything except being signed out, because that is the surprising case.
+pub fn ad_status(state: &LiveState, ad_fresh: bool) -> AdStatus {
+    if !state.signed_in.unwrap_or(false) {
+        return AdStatus::SignedOut;
+    }
+    if state.killed.unwrap_or(false) {
+        return AdStatus::Paused;
+    }
+    if !state.injection_on.unwrap_or(false) {
+        return AdStatus::InjectionOff;
+    }
+    if ad_fresh {
+        AdStatus::Live
+    } else {
+        AdStatus::Idle
+    }
+}
+
+/// Best-effort installed extension version, read from the VS Code extensions
+/// directory name (`kickbacksai.kickbacks-ai-<version>`). Returns the highest
+/// version found, or `None` if the extension is not installed there.
+pub fn installed_extension_version() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".vscode").join("extensions");
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut versions: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_prefix("kickbacksai.kickbacks-ai-")
+                .map(str::to_string)
+        })
+        .collect();
+    versions.sort();
+    versions.pop()
+}
+
 /// Fold the log into the latest known `session.state`.
 pub fn read_live_state() -> Result<LiveState> {
     let events = read_events_since(None)?;
@@ -195,5 +267,38 @@ mod tests {
         let ev = parse_log_line(line).unwrap();
         assert!(ev.ts_iso.as_str() > "2026-06-11T19:00:00.000Z");
         assert!(ev.ts_iso.as_str() <= "2026-06-11T20:00:00.000Z");
+    }
+
+    fn state(signed: bool, injection: bool, killed: bool) -> LiveState {
+        LiveState {
+            signed_in: Some(signed),
+            injection_on: Some(injection),
+            killed: Some(killed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ad_status_killswitch_takes_priority() {
+        // Signed in, injection on, fresh ad, but killed -> Paused.
+        assert_eq!(ad_status(&state(true, true, true), true), AdStatus::Paused);
+    }
+
+    #[test]
+    fn ad_status_live_and_idle() {
+        assert_eq!(ad_status(&state(true, true, false), true), AdStatus::Live);
+        assert_eq!(ad_status(&state(true, true, false), false), AdStatus::Idle);
+    }
+
+    #[test]
+    fn ad_status_signed_out_and_injection_off() {
+        assert_eq!(
+            ad_status(&state(false, true, false), true),
+            AdStatus::SignedOut
+        );
+        assert_eq!(
+            ad_status(&state(true, false, false), true),
+            AdStatus::InjectionOff
+        );
     }
 }

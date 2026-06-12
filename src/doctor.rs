@@ -57,6 +57,12 @@ pub fn run() -> Result<()> {
         },
     );
 
+    let ad_fresh = sources::read_cli_ad()?
+        .map(|a| util::now_ms() - a.ts <= FRESH_MS)
+        .unwrap_or(false);
+    let ad_status = sources::ad_status(&state, ad_fresh);
+    check("ads status", ad_status.is_live(), ad_status.label());
+
     let db = paths::db_path()?;
     let archive = Archive::open(&db)?;
     let stats = archive.stats(util::now_ms())?;
