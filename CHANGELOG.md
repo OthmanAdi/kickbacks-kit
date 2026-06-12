@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0]
+
+### Added
+* `kb snapshot`: a one-shot render of the dashboard to stdout (colored on a
+  terminal, plain when piped). The interactive `kb top`, this snapshot, and the
+  status line now draw through one shared render core, so they cannot disagree.
+* `kb statusline`: one status-bar line that keeps the current kickbacks ad
+  (prefix, hyperlink, control-character stripping, exactly like the extension's
+  own line) and appends your kb stats after it. Built for Claude Code's status
+  line setting.
+* `kb install-claude` and `kb uninstall-claude`: add or remove two global slash
+  commands (`/kbtop`, `/kbstatus`) and wire the status line. When the kickbacks
+  extension already owns the status line, the installer wraps it and keeps a
+  backup rather than replacing it.
+* An "earnings" pointer on the dashboard and in `kb status`. kb stays read-only
+  and offline, so it links to your portfolio (kickbacks.ai/me) instead of
+  reading a balance it cannot verify.
+
+### Changed
+* The 24 hour sparkline now distinguishes hours kb was not watching (shaded)
+  from hours with zero ads, so a gap in capture no longer reads as "no ads". A
+  per-hour coverage record backs this.
+* `debug.log` is read incrementally by byte offset and the live state is read
+  from a bounded tail, instead of re-parsing the whole file on every refresh.
+* Tagline parsing now shares the advertiser separator logic, so the "now
+  playing" tagline and the advertiser name always agree.
+* `--demo` is now a hidden dev-only flag for screenshots, and the demo dashboard
+  is built through the real archive path so it cannot drift from live data.
+
+### Notes
+* Reading live earnings over the extension's loopback was evaluated and dropped:
+  the local endpoint exposes only the log tail (no balance), and a real balance
+  needs the kickbacks.ai cloud backend, which the read-only invariant keeps out
+  of scope.
+
 ## [0.1.3]
 
 ### Added
