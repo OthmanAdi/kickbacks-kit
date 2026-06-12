@@ -21,6 +21,9 @@ const COOLDOWN_BASE_MS: i64 = 5 * 60 * 1000;
 const COOLDOWN_MAX_MS: i64 = 30 * 60 * 1000;
 /// Back off briefly when GitHub's remaining request budget runs low.
 const RATE_FLOOR: u32 = 8;
+/// A rate-limit cooldown is capped here (just over GitHub's hourly reset), so a
+/// malformed or hostile `x-ratelimit-reset` cannot park a source indefinitely.
+const RATE_LIMIT_MAX_MS: i64 = 65 * 60 * 1000;
 
 /// How many feed items to keep / show.
 pub const FEED_LIMIT: usize = 40;
@@ -100,7 +103,8 @@ pub fn sync(archive: &mut Archive, cfg: &Config, cli_offline: bool) -> FeedSnaps
         },
     );
 
-    // Upstream repo stats.
+    // Upstream repo stats. Each builder stamps the item's source with the same
+    // key the cache deletes by, so a refresh replaces rather than duplicates.
     fetch_into(
         archive,
         &client,
@@ -109,7 +113,7 @@ pub fn sync(archive: &mut Archive, cfg: &Config, cli_offline: bool) -> FeedSnaps
         now,
         |body| {
             github::parse_repo(body)
-                .map(|s| vec![github::upstream_stat_item(&s)])
+                .map(|s| vec![github::upstream_stat_item(&s, "github_repo")])
                 .unwrap_or_default()
         },
     );
@@ -123,7 +127,7 @@ pub fn sync(archive: &mut Archive, cfg: &Config, cli_offline: bool) -> FeedSnaps
         now,
         |body| {
             github::parse_latest_version(body)
-                .map(|v| vec![github::version_item(&v)])
+                .map(|v| vec![github::version_item(&v, "github_version")])
                 .unwrap_or_default()
         },
     );
@@ -135,7 +139,7 @@ pub fn sync(archive: &mut Archive, cfg: &Config, cli_offline: bool) -> FeedSnaps
         "github_issues",
         &github::issues_url(github::UPSTREAM_REPO),
         now,
-        |body| github::parse_issues(body, 8),
+        |body| github::parse_issues(body, 8, "github_issues"),
     );
 
     read_cached(archive, false)
@@ -187,7 +191,7 @@ fn fetch_into(
             }
             // Respect a low GitHub budget by parking the source until reset.
             if matches!(body.rate_remaining, Some(r) if r < RATE_FLOOR) {
-                health.circuit_until_ms = body.rate_reset_ms.map(|r| r.max(now + COOLDOWN_BASE_MS));
+                health.circuit_until_ms = Some(rate_limit_until(body.rate_reset_ms, now));
                 health.last_status = "rate limited".to_string();
             } else {
                 health.circuit_until_ms = None;
@@ -198,13 +202,28 @@ fn fetch_into(
         Err(err) => {
             health.failures = health.failures.saturating_add(1);
             health.last_status = format!("error: {}", short_err(&err));
-            if health.failures >= FAILURE_THRESHOLD {
-                health.circuit_until_ms = Some(now + cooldown_for(health.failures, now));
-            }
+            // Open the circuit only after the threshold; below it, clear any
+            // stale cooldown so a past-expiry value never lingers in the record.
+            health.circuit_until_ms = if health.failures >= FAILURE_THRESHOLD {
+                Some(now + cooldown_for(health.failures, now))
+            } else {
+                None
+            };
             // On error the cached items are left in place (stale-while-revalidate).
             let _ = archive.set_feed_source(&health);
         }
     }
+}
+
+/// When to retry a rate-limited source. Trusts the server's reset time, but
+/// clamps it into a sane window: at least `COOLDOWN_BASE_MS` out (so an absent
+/// or already-past reset still parks the source, instead of leaving the circuit
+/// closed and hammering a near-empty budget), and at most `RATE_LIMIT_MAX_MS`
+/// (so a hostile or broken `x-ratelimit-reset` cannot park a source forever).
+fn rate_limit_until(reset_ms: Option<i64>, now: i64) -> i64 {
+    let floor = now + COOLDOWN_BASE_MS;
+    let ceil = now + RATE_LIMIT_MAX_MS;
+    reset_ms.unwrap_or(floor).clamp(floor, ceil)
 }
 
 /// Cooldown that grows with the failure streak, jittered so many installs do
@@ -304,6 +323,55 @@ mod tests {
         let items = archive.read_feed_items(40).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source, "src_b");
+    }
+
+    #[test]
+    fn github_items_use_the_orchestrator_source_so_they_purge() {
+        // Regression: the builders once hardcoded source "github" while the
+        // orchestrator deletes by "github_issues", so a closed issue would
+        // never be purged and showed as open forever. The item's source must
+        // equal the key replace_feed_items deletes by.
+        let mut archive = Archive::open_in_memory().unwrap();
+        let issues_v1 = r#"[
+            {"number":1,"title":"open A","created_at":"2026-06-12T10:00:00Z"},
+            {"number":2,"title":"open B","created_at":"2026-06-12T09:00:00Z"}
+        ]"#;
+        let items = github::parse_issues(issues_v1, 8, "github_issues");
+        archive
+            .replace_feed_items("github_issues", &items, 1000)
+            .unwrap();
+        assert_eq!(archive.read_feed_items(40).unwrap().len(), 2);
+
+        // Issue #2 closed: the next fetch returns only #1. The cache for this
+        // source is replaced, so #2 is gone (not shown as open forever).
+        let issues_v2 = r#"[{"number":1,"title":"open A","created_at":"2026-06-12T10:00:00Z"}]"#;
+        let items = github::parse_issues(issues_v2, 8, "github_issues");
+        archive
+            .replace_feed_items("github_issues", &items, 2000)
+            .unwrap();
+        let remaining = archive.read_feed_items(40).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].title.starts_with("#1"));
+    }
+
+    #[test]
+    fn rate_limit_until_clamps_into_a_sane_window() {
+        let now = 1_000_000_000_000;
+        // Absent reset header: still parks the source (was a bug: left it open).
+        assert_eq!(rate_limit_until(None, now), now + COOLDOWN_BASE_MS);
+        // A hostile/huge reset cannot park the source forever.
+        assert_eq!(
+            rate_limit_until(Some(i64::MAX), now),
+            now + RATE_LIMIT_MAX_MS
+        );
+        // An already-past reset is floored to the base cooldown.
+        assert_eq!(
+            rate_limit_until(Some(now - 5000), now),
+            now + COOLDOWN_BASE_MS
+        );
+        // A legitimate near reset is respected.
+        let soon = now + 10 * 60 * 1000;
+        assert_eq!(rate_limit_until(Some(soon), now), soon);
     }
 
     #[test]

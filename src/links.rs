@@ -105,12 +105,16 @@ fn render_table(links: &[LinkRow], now_ms: i64) -> String {
     }
     let mut out = format!("{:<22}  {:>5}  {:>7}  url\n", "advertiser", "seen", "last");
     for l in links {
+        // The table prints to a terminal, so strip control characters from the
+        // advertiser-supplied text and URL: they could otherwise emit their own
+        // escape sequences. The structured formats (CSV, JSONL, HTML) escape on
+        // their own terms.
         out.push_str(&format!(
             "{:<22}  {:>5}  {:>7}  {}\n",
-            util::truncate(&l.advertiser, 22),
+            util::truncate(&util::sanitize_text(&l.advertiser), 22),
             l.times_seen,
             util::human_age_short(now_ms - l.last_seen_ms),
-            l.url,
+            util::sanitize_text(&l.url),
         ));
     }
     out
@@ -218,5 +222,20 @@ mod tests {
         assert!(table.contains("advertiser"));
         assert!(table.contains("tailscale.com"));
         assert!(render_table(&[], 0).contains("no advertiser links"));
+    }
+
+    #[test]
+    fn table_strips_control_chars_from_advertiser_and_url() {
+        // The table prints to a terminal; an escape sequence in the captured
+        // text must not survive into stdout.
+        let evil = vec![link(
+            "Evil\x1b]0;pwn\x07",
+            "https://e.com/\x1b[31mred",
+            1,
+            10,
+        )];
+        let table = render_table(&evil, 100);
+        assert!(!table.contains('\x1b'));
+        assert!(!table.contains('\x07'));
     }
 }

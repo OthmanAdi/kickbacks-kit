@@ -1072,11 +1072,12 @@ fn feed_item_lines(
         _ => fg(pal.fg),
     };
 
-    // marker(2) + glyph(1) + space(1) + title + pad + age
-    let fixed = marker.chars().count() + 2 + age.chars().count() + 1;
+    // marker + glyph + space + title + pad + age, measured in display columns so
+    // a wide-character (CJK) title does not overrun the row or clip the age.
+    let fixed = util::cols(marker) + 2 + util::cols(&age) + 1;
     let title_budget = width.saturating_sub(fixed).max(8);
     let title = util::truncate(&item.title, title_budget);
-    let used = marker.chars().count() + 2 + title.chars().count() + age.chars().count();
+    let used = util::cols(marker) + 2 + util::cols(&title) + util::cols(&age);
     let pad = " ".repeat(width.saturating_sub(used).max(1));
 
     let line1 = Line::from(vec![
@@ -1313,18 +1314,24 @@ fn link_line(
     let marker = if selected { "▌ " } else { "  " };
     let host = host_of(&link.url).unwrap_or_else(|| link.url.clone());
     let age = util::human_age_short(now_ms - link.last_seen_ms);
-    let meta = format!("{host}  {}x  {age}", link.times_seen);
 
     let name_style = if selected {
         fg(pal.gold).add_modifier(Modifier::BOLD)
     } else {
         fg(pal.fg)
     };
-    let fixed = marker.chars().count() + meta.chars().count() + 2;
-    let name_budget = width.saturating_sub(fixed).max(6);
-    let name = util::truncate(&link.advertiser, name_budget);
-    let used = marker.chars().count() + name.chars().count() + meta.chars().count();
-    let pad = " ".repeat(width.saturating_sub(used).max(2));
+
+    // Budget the row in display columns so it never exceeds `width`, even on a
+    // very narrow terminal: the marker is fixed, the meta is truncated to what
+    // is left, and the name takes the remainder minus a one-column gap. Because
+    // every piece is measured and capped, the total is at most `width`.
+    let marker_w = util::cols(marker);
+    let avail = width.saturating_sub(marker_w);
+    let meta = util::truncate(&format!("{host}  {}x  {age}", link.times_seen), avail);
+    let meta_w = util::cols(&meta);
+    let name = util::truncate(&link.advertiser, avail.saturating_sub(meta_w + 1));
+    let used = marker_w + util::cols(&name) + meta_w;
+    let pad = " ".repeat(width.saturating_sub(used).max(1));
 
     Line::from(vec![
         Span::styled(marker, fg(pal.gold)),

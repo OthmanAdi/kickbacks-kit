@@ -125,11 +125,13 @@ pub fn render_markdown(d: &Digest) -> String {
     } else {
         for l in &d.links {
             let host = host_of(&l.url).unwrap_or_default();
+            // Angle-bracket the destination so a `)` in a tracking URL cannot
+            // close the link early and inject text; escape the label and host.
             s.push_str(&format!(
-                "- [{}]({}) · {} · {}×\n",
+                "- [{}](<{}>) · {} · {}×\n",
                 md_cell(&l.advertiser),
-                l.url,
-                host,
+                md_url(&l.url),
+                md_cell(&host),
                 l.times_seen
             ));
         }
@@ -157,9 +159,20 @@ pub fn render_markdown(d: &Digest) -> String {
     s
 }
 
-/// Escape the characters that would break a Markdown table cell or a link label.
+/// Escape the characters that would break a Markdown table cell or a link
+/// label. Also neutralizes a backtick so a value cannot open an inline code
+/// span, and a pipe so it cannot split a table row.
 fn md_cell(s: &str) -> String {
-    s.replace('|', "\\|").replace(['\n', '\r'], " ")
+    s.replace('|', "\\|")
+        .replace('`', "\\`")
+        .replace(['\n', '\r'], " ")
+}
+
+/// Make a URL safe inside an angle-bracket Markdown destination `<...>`: drop
+/// the angle brackets and any newline that would terminate it. The surrounding
+/// `<>` then makes a `)` in the URL harmless.
+fn md_url(s: &str) -> String {
+    s.replace(['<', '>', '\n', '\r'], "")
 }
 
 pub fn render_html(d: &Digest) -> String {
@@ -319,6 +332,22 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn markdown_link_url_cannot_inject() {
+        let mut d = digest();
+        // A click URL containing ')' would close a plain Markdown link early.
+        d.links = vec![LinkRow {
+            advertiser: "Evil".to_string(),
+            url: "https://a.com/b)injected".to_string(),
+            last_seen_ms: 0,
+            times_seen: 1,
+        }];
+        let md = render_markdown(&d);
+        // Angle-bracket destination keeps the whole URL inside the link.
+        assert!(md.contains("](<https://a.com/b)injected>)"));
+        assert!(!md.contains("](https://a.com/b)injected)"));
     }
 
     #[test]

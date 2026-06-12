@@ -145,18 +145,39 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
-/// Truncate a string to `max` display columns, appending `…` when cut.
-/// Counts `char`s (good enough for the Latin + punctuation creatives here).
+/// Display width of `s` in terminal columns, where a wide (CJK, fullwidth)
+/// character counts as two. Use this, not `chars().count()`, whenever the
+/// result feeds a layout or padding calculation.
+pub fn cols(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    s.width()
+}
+
+/// Truncate a string to `max` display columns, appending `…` when cut. Width
+/// aware: a wide character counts as two columns, so a title of CJK text stops
+/// at the right column boundary instead of overflowing. ASCII text behaves
+/// exactly as a char-count truncation would.
 pub fn truncate(s: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
     if max == 0 {
         return String::new();
     }
-    let count = s.chars().count();
-    if count <= max {
+    if cols(s) <= max {
         return s.to_string();
     }
-    let keep = max.saturating_sub(1);
-    let mut out: String = s.chars().take(keep).collect();
+    // Reserve one column for the ellipsis, then take characters until the next
+    // would exceed the budget.
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
     out.push('…');
     out
 }
@@ -179,6 +200,19 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
         assert_eq!(truncate("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_is_display_width_aware() {
+        // Each CJK character is two columns wide.
+        assert_eq!(cols("日本語"), 6);
+        // A 6-column string fits in 6 columns unchanged.
+        assert_eq!(truncate("日本語", 6), "日本語");
+        // In 5 columns, only two wide chars fit (4 cols) plus the ellipsis.
+        let cut = truncate("日本語", 5);
+        assert!(cols(&cut) <= 5, "width {} exceeds 5", cols(&cut));
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut, "日本…");
     }
 
     #[test]

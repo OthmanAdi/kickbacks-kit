@@ -182,23 +182,28 @@ fn run_loop(
 /// The background feed loop: fetch immediately, then on every refresh request or
 /// after the refresh interval, until the UI disconnects the channel.
 fn feed_fetch_loop(snap_tx: &Sender<FeedUpdate>, req_rx: &Receiver<()>, cfg: &Config) {
+    // Open the archive once. WAL lets this writer run alongside the UI's handle,
+    // and reusing it avoids re-parsing the schema on every cycle.
+    let mut archive = match paths::db_path().and_then(|p| Archive::open(&p)) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
     loop {
         if snap_tx.send(FeedUpdate::Fetching).is_err() {
             return;
         }
-        // A fresh handle each cycle keeps this independent of the UI's handle.
-        let snapshot = match paths::db_path().and_then(|p| Archive::open(&p)) {
-            Ok(mut archive) => sync::sync(&mut archive, cfg, false),
-            Err(_) => FeedSnapshot {
-                offline: false,
-                ..Default::default()
-            },
-        };
+        let snapshot = sync::sync(&mut archive, cfg, false);
         if snap_tx.send(FeedUpdate::Done(snapshot)).is_err() {
             return;
         }
         match req_rx.recv_timeout(FEED_REFRESH) {
-            Ok(()) | Err(RecvTimeoutError::Timeout) => continue,
+            Ok(()) => {
+                // Collapse a burst of refresh requests (several quick `r`
+                // presses) into a single fetch, so they cannot queue up many
+                // back-to-back GitHub calls and trip the rate limit.
+                while req_rx.try_recv().is_ok() {}
+            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }

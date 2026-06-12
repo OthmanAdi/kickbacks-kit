@@ -158,6 +158,7 @@ impl Archive {
         conn.busy_timeout(std::time::Duration::from_millis(500))
             .ok();
         conn.execute_batch(SCHEMA).context("running migrations")?;
+        Self::migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -165,7 +166,44 @@ impl Archive {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        Self::migrate(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// One-time data migrations beyond the idempotent `CREATE IF NOT EXISTS`
+    /// schema, guarded by a key in `meta` so each runs exactly once.
+    fn migrate(conn: &Connection) -> Result<()> {
+        let done: Option<String> = conn
+            .query_row(
+                "SELECT v FROM meta WHERE k = 'feed_source_migration'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        // Version "3": purge the orphaned "github" items AND reset the GitHub
+        // source health, so a DB left half-migrated by an earlier build still
+        // re-syncs cleanly. Earlier versions only deleted items or cleared the
+        // ETag, which could leave a source parked or 304-ing against an empty
+        // cache.
+        if done.as_deref() != Some("3") {
+            // An unreleased build wrote GitHub feed items under the source
+            // "github" while the cache deletes by per-endpoint keys
+            // ("github_repo" / "github_version" / "github_issues"), so those
+            // rows could never be purged and a closed issue showed as open.
+            // feed_items is a cache, so dropping the orphaned rows is safe.
+            conn.execute("DELETE FROM feed_items WHERE source = 'github'", [])?;
+            // Drop the GitHub source health rows (ETag, circuit state, failures)
+            // so the next sync re-downloads each endpoint from scratch and
+            // repopulates the items under the correct source. On a fresh
+            // install there are no such rows, so this is a no-op.
+            conn.execute("DELETE FROM feed_sources WHERE source LIKE 'github%'", [])?;
+            conn.execute(
+                "INSERT INTO meta (k, v) VALUES ('feed_source_migration', '3')
+                 ON CONFLICT(k) DO UPDATE SET v = '3'",
+                [],
+            )?;
+        }
+        Ok(())
     }
 
     // ---- writes -----------------------------------------------------------
@@ -832,6 +870,60 @@ mod tests {
 
         let hourly = a.advertiser_hourly("Tailscale", now, 3).unwrap();
         assert_eq!(hourly, vec![None, Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn migration_purges_orphaned_github_source_rows() {
+        let mut a = Archive::open_in_memory().unwrap();
+        // Simulate a legacy row written under the old "github" source plus a
+        // correct one under the new per-endpoint key.
+        let legacy = crate::feed::FeedItem::new(
+            crate::feed::FeedKind::Issue,
+            "#9 stale",
+            "",
+            Some("https://x/9".into()),
+            Some(1),
+            "github",
+        );
+        let current = crate::feed::FeedItem::new(
+            crate::feed::FeedKind::Issue,
+            "#10 fresh",
+            "",
+            Some("https://x/10".into()),
+            Some(2),
+            "github_issues",
+        );
+        a.replace_feed_items("github", &[legacy], 10).unwrap();
+        a.replace_feed_items("github_issues", &[current], 10)
+            .unwrap();
+        assert_eq!(a.read_feed_items(40).unwrap().len(), 2);
+
+        // Reset the guard to simulate a DB that predates the migration, then run
+        // it: the orphaned "github" row is purged, the correct one stays.
+        a.conn
+            .execute("DELETE FROM meta WHERE k = 'feed_source_migration'", [])
+            .unwrap();
+        Archive::migrate(&a.conn).unwrap();
+        let rows = a.read_feed_items(40).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].title.starts_with("#10"));
+
+        // Guarded: a second run does not touch a freshly inserted legacy row.
+        a.replace_feed_items("github", &[legacy_again()], 20)
+            .unwrap();
+        Archive::migrate(&a.conn).unwrap();
+        assert_eq!(a.read_feed_items(40).unwrap().len(), 2);
+    }
+
+    fn legacy_again() -> crate::feed::FeedItem {
+        crate::feed::FeedItem::new(
+            crate::feed::FeedKind::Issue,
+            "#11 later",
+            "",
+            Some("https://x/11".into()),
+            Some(3),
+            "github",
+        )
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl FeedItem {
 /// last reached a source and whether it is currently backing off. This is the
 /// transparency contract: the user can see at any moment what the network is
 /// doing and why.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceHealth {
     pub source: String,
     /// Short human status, e.g. `ok`, `up to date`, `offline`, `cooling down`,
@@ -161,7 +161,7 @@ pub struct SourceHealth {
 }
 
 /// Everything a read surface needs to render the feed, all from the cache.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FeedSnapshot {
     pub items: Vec<FeedItem>,
     pub sources: Vec<SourceHealth>,

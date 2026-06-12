@@ -67,8 +67,10 @@ pub fn parse_repo(json: &str) -> Option<RepoStats> {
     })
 }
 
-/// Build the repo-stats feed item for the upstream product repo.
-pub fn upstream_stat_item(stats: &RepoStats) -> FeedItem {
+/// Build the repo-stats feed item for the upstream product repo. `source` must
+/// be the orchestrator's source key for this fetch, so the item's `source`
+/// matches the key the cache deletes by (otherwise stale rows never purge).
+pub fn upstream_stat_item(stats: &RepoStats, source: &str) -> FeedItem {
     let body = format!(
         "{} stars · {} forks · {} open items",
         stats.stars, stats.forks, stats.open_items
@@ -82,7 +84,7 @@ pub fn upstream_stat_item(stats: &RepoStats) -> FeedItem {
             .clone()
             .or_else(|| Some(format!("https://github.com/{UPSTREAM_REPO}"))),
         stats.pushed_at_ms,
-        "github",
+        source,
     )
 }
 
@@ -146,15 +148,16 @@ fn extract_sync_version(message: &str) -> Option<String> {
     }
 }
 
-/// Build the version feed item.
-pub fn version_item(v: &VersionSync) -> FeedItem {
+/// Build the version feed item. `source` is the orchestrator's source key (see
+/// [`upstream_stat_item`]).
+pub fn version_item(v: &VersionSync, source: &str) -> FeedItem {
     FeedItem::new(
         FeedKind::Version,
         format!("Extension synced to v{}", v.version),
         "kickbacks.ai VS Code extension",
         Some(format!("https://github.com/{UPSTREAM_REPO}/commits/main")),
         v.ts_ms,
-        "github",
+        source,
     )
 }
 
@@ -176,8 +179,9 @@ struct Issue {
 }
 
 /// Parse the issues endpoint into feed items, dropping pull requests and
-/// keeping at most `limit` real issues, newest first.
-pub fn parse_issues(json: &str, limit: usize) -> Vec<FeedItem> {
+/// keeping at most `limit` real issues, newest first. `source` is the
+/// orchestrator's source key (see [`upstream_stat_item`]).
+pub fn parse_issues(json: &str, limit: usize, source: &str) -> Vec<FeedItem> {
     let issues: Vec<Issue> = match serde_json::from_str(json) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -203,7 +207,7 @@ pub fn parse_issues(json: &str, limit: usize) -> Vec<FeedItem> {
                     ))
                 }),
                 ts,
-                "github",
+                source,
             )
         })
         .collect()
@@ -233,9 +237,12 @@ mod tests {
         assert_eq!(s.forks, 33);
         assert_eq!(s.open_items, 45);
         assert!(s.pushed_at_ms.unwrap() > 0);
-        let item = upstream_stat_item(&s);
+        let item = upstream_stat_item(&s, "github_repo");
         assert!(item.body.contains("158 stars"));
         assert_eq!(item.kind, FeedKind::Stat);
+        // The item's source must equal the orchestrator key the cache deletes
+        // by, or stale rows never purge.
+        assert_eq!(item.source, "github_repo");
     }
 
     #[test]
@@ -256,8 +263,9 @@ mod tests {
         let v = parse_latest_version(COMMITS_JSON).unwrap();
         assert_eq!(v.version, "0.3.172");
         assert!(v.ts_ms.unwrap() > 0);
-        let item = version_item(&v);
+        let item = version_item(&v, "github_version");
         assert!(item.title.contains("v0.3.172"));
+        assert_eq!(item.source, "github_version");
     }
 
     #[test]
@@ -280,22 +288,24 @@ mod tests {
 
     #[test]
     fn parses_issues_and_drops_pulls() {
-        let items = parse_issues(ISSUES_JSON, 10);
+        let items = parse_issues(ISSUES_JSON, 10, "github_issues");
         assert_eq!(items.len(), 2); // the PR is dropped
         assert!(items[0].title.starts_with("#52"));
         assert!(items[0].url.as_deref().unwrap().contains("/issues/52"));
         // Issue without html_url still gets a synthesized link.
         assert!(items[1].url.as_deref().unwrap().contains("/issues/50"));
+        // Source matches the orchestrator delete key.
+        assert!(items.iter().all(|i| i.source == "github_issues"));
     }
 
     #[test]
     fn parse_issues_handles_garbage() {
-        assert!(parse_issues("not json", 10).is_empty());
-        assert!(parse_issues("{}", 10).is_empty());
+        assert!(parse_issues("not json", 10, "github_issues").is_empty());
+        assert!(parse_issues("{}", 10, "github_issues").is_empty());
     }
 
     #[test]
     fn issue_limit_is_respected() {
-        assert_eq!(parse_issues(ISSUES_JSON, 1).len(), 1);
+        assert_eq!(parse_issues(ISSUES_JSON, 1, "github_issues").len(), 1);
     }
 }
