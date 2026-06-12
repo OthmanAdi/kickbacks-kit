@@ -10,7 +10,7 @@ a local ad archive plus a Rust TUI dashboard for ad sightings, advertisers, and 
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-74%20passing-brightgreen.svg)](#testing)
 [![Read only](https://img.shields.io/badge/read--only-never%20bills-success.svg)](#what-this-is-and-is-not)
 
 <img src="media/kbtop.svg" alt="kickbacks-kit kbtop terminal dashboard for kickbacks.ai showing the current ad, total ads seen, a 24 hour sightings sparkline, the advertiser leaderboard, and recent ads in Claude Code" width="820">
@@ -104,8 +104,8 @@ with `kb uninstall-claude`.
 
 | Command | What it does |
 | :------ | :----------- |
-| `kb top` | Live TUI dashboard. Captures on every tick. |
-| `kb snapshot [--width N] [--plain]` | One-shot dashboard render to stdout. Same view as `kb top`. |
+| `kb top [--theme T]` | Live TUI dashboard. Captures on every tick. Press `t` to pick a theme. |
+| `kb snapshot [--width N] [--plain] [--theme T]` | One-shot dashboard render to stdout. Same view as `kb top`. |
 | `kb statusline [--width N] [--plain]` | One status-bar line: the current ad plus your kb stats. |
 | `kb status` | Whether ads are flowing now, and why not (killswitch, idle, signed out). |
 | `kb watch [--interval N] [--once]` | Headless capture loop. Default poll is 3 seconds. |
@@ -116,6 +116,26 @@ with `kb uninstall-claude`.
 | `kb setup` | First-run: create the archive, capture once. |
 | `kb doctor` | Check the local data sources and the archive. |
 | `kb install-claude` / `kb uninstall-claude` | Add or remove the `/kbtop` and `/kbstatus` commands and the status line. |
+
+## Themes
+
+The dashboard reads on a dark or a light terminal. Pick a theme with `--theme`
+on `kb top` or `kb snapshot`, or press `t` inside `kb top` for a live picker
+(arrow keys preview, Enter saves, Esc reverts). The choice is remembered.
+
+| Theme | What you get |
+| :---- | :----------- |
+| `auto` | Detect a light or dark terminal and match it. Falls back to dark when the terminal does not report its background. This is the default. |
+| `dark` | A dark canvas, the same look as the screenshot above, on any terminal. |
+| `light` | A light canvas tuned for bright terminals. Every color clears WCAG AA contrast. |
+| `terminal` | No painted canvas: use your terminal's own colors and background. |
+
+Auto-detection uses the `COLORFGBG` variable that many terminals export. When it
+is absent (some terminals, including Windows Terminal, do not set it), `auto`
+stays on the dark canvas, which is readable on a light background too. Pick
+`light` or `terminal` explicitly, or use the picker, to override. Your selection
+is saved to `<config-dir>/kickbacks-kit/config.json` (override with
+`KICKBACKS_KIT_CONFIG`).
 
 ## How it works
 

@@ -2,6 +2,11 @@
 //! asset generator all draw through the single `ui` function here, so the
 //! three surfaces can never disagree about what the dashboard looks like.
 //!
+//! Colors come from a [`Palette`](crate::theme::Palette) carried on [`App`],
+//! not from hardcoded constants, so the same renderer produces the dark, light,
+//! and terminal-native looks. When the palette paints a background, `ui` fills
+//! the whole canvas first so the dashboard reads the same on any terminal.
+//!
 //! Demo data is produced by seeding a real in-memory archive and running the
 //! same refresh path as live data, so the demo cannot drift from reality.
 
@@ -10,24 +15,15 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Padding, Paragraph, Row, Sparkline, Table,
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Sparkline, Table,
 };
 use ratatui::Frame;
 
 use crate::archive::{AdvertiserStat, Archive, Stats};
 use crate::model::{host_of, AdRow, CliAd};
 use crate::sources::{self, LiveState};
+use crate::theme::{Palette, Theme};
 use crate::util;
-
-// ---- palette --------------------------------------------------------------
-
-const GOLD: Color = Color::Rgb(245, 197, 66);
-const TEAL: Color = Color::Rgb(94, 234, 212);
-const GREEN: Color = Color::Rgb(126, 211, 33);
-const RED: Color = Color::Rgb(255, 95, 109);
-const FG: Color = Color::Rgb(222, 222, 232);
-const DIM: Color = Color::Rgb(120, 122, 138);
-const FRAME: Color = Color::Rgb(70, 72, 92);
 
 /// `cli-ad.json` freshness window, mirroring the extension.
 const FRESH_MS: i64 = 600_000;
@@ -41,6 +37,45 @@ pub const PORTFOLIO_URL: &str = "https://kickbacks.ai/me";
 
 // ---- app state ------------------------------------------------------------
 
+/// State of the in-TUI theme picker overlay. Present only while the picker is
+/// open. The dashboard behind it renders with the previewed theme so the user
+/// sees the change live before committing.
+#[derive(Debug, Clone)]
+pub struct ThemePicker {
+    pub options: Vec<Theme>,
+    pub cursor: usize,
+    /// The theme that was active when the picker opened, restored on cancel.
+    pub original: Theme,
+}
+
+impl ThemePicker {
+    /// Open the picker with the cursor on the currently active theme.
+    pub fn open(current: Theme) -> Self {
+        let options = Theme::all().to_vec();
+        let cursor = options.iter().position(|&t| t == current).unwrap_or(0);
+        ThemePicker {
+            options,
+            cursor,
+            original: current,
+        }
+    }
+
+    /// The theme currently under the cursor (the live preview).
+    pub fn selected(&self) -> Theme {
+        self.options[self.cursor]
+    }
+
+    pub fn up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn down(&mut self) {
+        if self.cursor + 1 < self.options.len() {
+            self.cursor += 1;
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct App {
     pub now_ms: i64,
@@ -52,6 +87,12 @@ pub struct App {
     pub live: LiveState,
     pub current: Option<CliAd>,
     pub demo: bool,
+    /// The active theme selection (shown in the keybind line, saved to config).
+    pub theme: Theme,
+    /// Concrete colors to draw with, derived from `theme`.
+    pub palette: Palette,
+    /// Some while the theme picker overlay is open.
+    pub picker: Option<ThemePicker>,
 }
 
 impl App {
@@ -61,6 +102,12 @@ impl App {
         self.live = sources::read_live_state().unwrap_or_default();
         self.current = sources::read_cli_ad().ok().flatten();
         Ok(())
+    }
+
+    /// Apply a theme: store it and resolve its concrete palette.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.palette = theme.palette();
     }
 
     /// Refresh only the archive-backed panels, relative to `now_ms`. The demo
@@ -172,19 +219,44 @@ pub fn demo_app() -> App {
 
 // ---- rendering ------------------------------------------------------------
 
+/// Foreground-only style. Background is handled once, by the canvas fill in
+/// [`ui`], so individual spans never need to carry it.
+fn fg(color: Color) -> Style {
+    Style::default().fg(color)
+}
+
+/// A solid-background style for surfaces (the canvas, the picker overlay).
+fn bg_style(pal: &Palette) -> Style {
+    match pal.bg {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    }
+}
+
 pub fn ui(frame: &mut Frame, app: &App) {
+    let pal = &app.palette;
+    let area = frame.area();
+
+    // Paint the whole canvas once. Every widget below sets only a foreground,
+    // so these background cells survive and the dashboard reads the same on a
+    // light or dark terminal. The `terminal` palette leaves `bg` as `None` and
+    // inherits the terminal's own background.
+    if pal.bg.is_some() {
+        frame.render_widget(Block::default().style(bg_style(pal)), area);
+    }
+
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(FRAME))
+        .border_style(fg(pal.frame))
         .padding(Padding::new(1, 1, 0, 0))
-        .title_top(brand_title(app.demo))
-        .title_top(status_chips(&app.live).right_aligned())
-        .title_bottom(keybinds_line())
-        .title_bottom(ethic_line().right_aligned());
+        .title_top(brand_title(pal, app.demo))
+        .title_top(status_chips(pal, &app.live).right_aligned())
+        .title_bottom(keybinds_line(pal, app.theme))
+        .title_bottom(ethic_line(pal).right_aligned());
 
-    let inner = outer.inner(frame.area());
-    frame.render_widget(outer, frame.area());
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
     let columns = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
         .spacing(1)
@@ -192,65 +264,65 @@ pub fn ui(frame: &mut Frame, app: &App) {
 
     render_left(frame, columns[0], app);
     render_right(frame, columns[1], app);
+
+    if app.picker.is_some() {
+        render_theme_picker(frame, area, app);
+    }
 }
 
-fn brand_title(demo: bool) -> Line<'static> {
+fn brand_title(pal: &Palette, demo: bool) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(
-            " kickbacks",
-            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "-kit ",
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("· kbtop ", Style::default().fg(DIM)),
+        Span::styled(" kickbacks", fg(pal.gold).add_modifier(Modifier::BOLD)),
+        Span::styled("-kit ", fg(pal.fg).add_modifier(Modifier::BOLD)),
+        Span::styled("· kbtop ", fg(pal.dim)),
     ];
     if demo {
         spans.push(Span::styled(
             "· demo data ",
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
         ));
     }
     Line::from(spans)
 }
 
-fn status_chips(live: &LiveState) -> Line<'static> {
+fn status_chips(pal: &Palette, live: &LiveState) -> Line<'static> {
     let mut spans = Vec::new();
     let signed = live.signed_in.unwrap_or(false);
-    spans.push(chip(signed, "signed in", "signed out"));
+    spans.push(chip(pal, signed, "signed in", "signed out"));
     spans.push(Span::raw("  "));
     let ads_on = live.injection_on.unwrap_or(false);
-    spans.push(chip(ads_on, "ads on", "ads off"));
+    spans.push(chip(pal, ads_on, "ads on", "ads off"));
     if live.killed.unwrap_or(false) {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled("● killed", Style::default().fg(RED)));
+        spans.push(Span::styled("● killed", fg(pal.red)));
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
-fn chip(on: bool, yes: &str, no: &str) -> Span<'static> {
+fn chip(pal: &Palette, on: bool, yes: &str, no: &str) -> Span<'static> {
     if on {
-        Span::styled(format!("● {yes}"), Style::default().fg(GREEN))
+        Span::styled(format!("● {yes}"), fg(pal.green))
     } else {
-        Span::styled(format!("○ {no}"), Style::default().fg(DIM))
+        Span::styled(format!("○ {no}"), fg(pal.dim))
     }
 }
 
-fn keybinds_line() -> Line<'static> {
+fn keybinds_line(pal: &Palette, theme: Theme) -> Line<'static> {
     Line::from(vec![
-        Span::styled(" q ", Style::default().fg(GOLD)),
-        Span::styled("quit  ", Style::default().fg(DIM)),
-        Span::styled("r ", Style::default().fg(GOLD)),
-        Span::styled("refresh ", Style::default().fg(DIM)),
+        Span::styled(" q ", fg(pal.gold)),
+        Span::styled("quit  ", fg(pal.dim)),
+        Span::styled("r ", fg(pal.gold)),
+        Span::styled("refresh  ", fg(pal.dim)),
+        Span::styled("t ", fg(pal.gold)),
+        Span::styled(format!("theme: {} ", theme.label()), fg(pal.dim)),
     ])
 }
 
-fn ethic_line() -> Line<'static> {
+fn ethic_line(pal: &Palette) -> Line<'static> {
     Line::from(Span::styled(
         " read-only · observes, never bills ",
-        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+        fg(pal.dim).add_modifier(Modifier::ITALIC),
     ))
 }
 
@@ -273,18 +345,19 @@ fn render_right(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Build a section: a label line, then the body rect beneath it.
-fn section(frame: &mut Frame, area: Rect, label: &str) -> Rect {
+fn section(frame: &mut Frame, area: Rect, pal: &Palette, label: &str) -> Rect {
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let head = Paragraph::new(Line::from(Span::styled(
         label,
-        Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
+        fg(pal.teal).add_modifier(Modifier::BOLD),
     )));
     frame.render_widget(head, parts[0]);
     parts[1]
 }
 
 fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
-    let body = section(frame, area, "NOW PLAYING");
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "NOW PLAYING");
     let fresh = app
         .current
         .as_ref()
@@ -296,16 +369,10 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         let lines = vec![
             Line::from(Span::styled(
                 "● ADS PAUSED",
-                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+                fg(pal.red).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                "kickbacks killswitch active",
-                Style::default().fg(RED),
-            )),
-            Line::from(Span::styled(
-                "server-side, not you",
-                Style::default().fg(DIM),
-            )),
+            Line::from(Span::styled("kickbacks killswitch active", fg(pal.red))),
+            Line::from(Span::styled("server-side, not you", fg(pal.dim))),
         ];
         frame.render_widget(Paragraph::new(lines), body);
         return;
@@ -324,26 +391,23 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
             vec![
                 Line::from(Span::styled(
                     advertiser,
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                    fg(pal.gold).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
                     util::truncate(&tagline, area.width.saturating_sub(2) as usize),
-                    Style::default().fg(FG),
+                    fg(pal.fg),
                 )),
-                Line::from(Span::styled(
-                    format!("{host} · {age}"),
-                    Style::default().fg(DIM),
-                )),
+                Line::from(Span::styled(format!("{host} · {age}"), fg(pal.dim))),
             ]
         }
         _ => vec![
             Line::from(Span::styled(
                 "no ad right now",
-                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                fg(pal.dim).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 "code with the extension running to see ads",
-                Style::default().fg(DIM),
+                fg(pal.dim),
             )),
         ],
     };
@@ -352,15 +416,13 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_totals(frame: &mut Frame, area: Rect, app: &App) {
-    let body = section(frame, area, "TOTALS");
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "TOTALS");
     let s = &app.stats;
     let span = |label: &'static str, value: String| {
         Line::from(vec![
-            Span::styled(format!("{label:<12}"), Style::default().fg(DIM)),
-            Span::styled(
-                value,
-                Style::default().fg(TEAL).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!("{label:<12}"), fg(pal.dim)),
+            Span::styled(value, fg(pal.teal).add_modifier(Modifier::BOLD)),
         ])
     };
     let mut lines = vec![
@@ -373,34 +435,29 @@ fn render_totals(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(first) = s.first_seen_ms {
         lines.push(Line::from(Span::styled(
             format!("since {}", util::fmt_datetime(first)),
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
         )));
     }
     // Earnings deliberately live off-screen: kb never reads balances (that
     // needs the cloud backend). Point the user to the real number instead of
     // inventing one.
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "$ earnings",
-        Style::default().fg(DIM),
-    )));
-    lines.push(Line::from(Span::styled(
-        PORTFOLIO_URL,
-        Style::default().fg(GOLD),
-    )));
+    lines.push(Line::from(Span::styled("$ earnings", fg(pal.dim))));
+    lines.push(Line::from(Span::styled(PORTFOLIO_URL, fg(pal.gold))));
     lines.push(Line::from(Span::styled(
         "read-only · kb does not read balances",
-        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+        fg(pal.dim).add_modifier(Modifier::ITALIC),
     )));
     frame.render_widget(Paragraph::new(lines), body);
 }
 
 fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
-    let body = section(frame, area, "SIGHTINGS · LAST 24H");
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "SIGHTINGS · LAST 24H");
     if app.sparkline.iter().all(Option::is_none) {
         let hint = Paragraph::new(Line::from(Span::styled(
             "not watching — run kb watch or keep kb top open",
-            Style::default().fg(DIM),
+            fg(pal.dim),
         )));
         frame.render_widget(hint, body);
         return;
@@ -414,51 +471,46 @@ fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
     };
     let spark = Sparkline::default()
         .data(app.sparkline.iter().copied())
-        .style(Style::default().fg(GOLD))
+        .style(fg(pal.gold))
         .absent_value_symbol("░")
-        .absent_value_style(Style::default().fg(DIM));
+        .absent_value_style(fg(pal.dim));
     frame.render_widget(spark, spark_area);
     if let Some(legend) = legend_area {
         let note = Paragraph::new(Line::from(Span::styled(
             "░ hours kb was not watching",
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
         )));
         frame.render_widget(note, legend);
     }
 }
 
 fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
-    let body = section(frame, area, "TOP ADVERTISERS");
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "TOP ADVERTISERS");
     if app.leaderboard.is_empty() {
-        frame.render_widget(empty_hint(), body);
+        frame.render_widget(empty_hint(pal), body);
         return;
     }
     let name_w = body.width.saturating_sub(14) as usize;
     let rows = app.leaderboard.iter().enumerate().map(|(i, a)| {
         Row::new(vec![
-            Cell::from(Span::styled(
-                format!("{:>2}", i + 1),
-                Style::default().fg(DIM),
-            )),
+            Cell::from(Span::styled(format!("{:>2}", i + 1), fg(pal.dim))),
             Cell::from(Span::styled(
                 util::truncate(&a.advertiser, name_w),
-                Style::default().fg(FG),
+                fg(pal.fg),
             )),
-            Cell::from(Span::styled(
-                a.distinct_ads.to_string(),
-                Style::default().fg(DIM),
-            )),
+            Cell::from(Span::styled(a.distinct_ads.to_string(), fg(pal.dim))),
             Cell::from(Span::styled(
                 a.sightings.to_string(),
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                fg(pal.gold).add_modifier(Modifier::BOLD),
             )),
         ])
     });
     let header = Row::new(vec![
         Cell::from(""),
-        Cell::from(Span::styled("advertiser", Style::default().fg(DIM))),
-        Cell::from(Span::styled("ads", Style::default().fg(DIM))),
-        Cell::from(Span::styled("seen", Style::default().fg(DIM))),
+        Cell::from(Span::styled("advertiser", fg(pal.dim))),
+        Cell::from(Span::styled("ads", fg(pal.dim))),
+        Cell::from(Span::styled("seen", fg(pal.dim))),
     ]);
     let widths = [
         Constraint::Length(3),
@@ -471,9 +523,10 @@ fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_recent(frame: &mut Frame, area: Rect, app: &App) {
-    let body = section(frame, area, "RECENT ADS");
+    let pal = &app.palette;
+    let body = section(frame, area, pal, "RECENT ADS");
     if app.recent.is_empty() {
-        frame.render_widget(empty_hint(), body);
+        frame.render_widget(empty_hint(pal), body);
         return;
     }
     let width = body.width.saturating_sub(2) as usize;
@@ -482,19 +535,90 @@ fn render_recent(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|ad| {
             Line::from(vec![
-                Span::styled("· ", Style::default().fg(GOLD)),
-                Span::styled(util::truncate(&ad.ad_text, width), Style::default().fg(FG)),
+                Span::styled("· ", fg(pal.gold)),
+                Span::styled(util::truncate(&ad.ad_text, width), fg(pal.fg)),
             ])
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), body);
 }
 
-fn empty_hint() -> Paragraph<'static> {
+fn empty_hint(pal: &Palette) -> Paragraph<'static> {
     Paragraph::new(Line::from(Span::styled(
         "nothing captured yet",
-        Style::default().fg(DIM),
+        fg(pal.dim),
     )))
+}
+
+/// A centered rect of the given size, clamped to `area`.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// Draw the theme picker overlay on top of the (already previewed) dashboard.
+fn render_theme_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let pal = &app.palette;
+    let Some(picker) = &app.picker else { return };
+
+    let width = 46;
+    let height = picker.options.len() as u16 + 4;
+    let rect = centered(area, width, height);
+
+    // Clear the region, then paint our own surface so the overlay is opaque.
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(fg(pal.gold))
+        .style(bg_style(pal))
+        .padding(Padding::new(1, 1, 0, 0))
+        .title_top(Line::from(Span::styled(
+            " choose a theme ",
+            fg(pal.gold).add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let parts = Layout::vertical([
+        Constraint::Length(picker.options.len() as u16),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let lines: Vec<Line> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let selected = i == picker.cursor;
+            let marker = if selected { "›" } else { " " };
+            let name_style = if selected {
+                fg(pal.gold).add_modifier(Modifier::BOLD)
+            } else {
+                fg(pal.fg)
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker} "), fg(pal.gold)),
+                Span::styled(format!("{:<9}", t.label()), name_style),
+                Span::styled(t.hint().to_string(), fg(pal.dim)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), parts[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ preview · enter save · esc cancel",
+            fg(pal.dim).add_modifier(Modifier::ITALIC),
+        ))),
+        parts[1],
+    );
 }
 
 #[cfg(test)]
@@ -502,19 +626,22 @@ mod tests {
     use super::*;
     use crate::archive::Stats;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn rendered(app: &App) -> String {
+    fn buffer_of(app: &App) -> Buffer {
         let backend = TestBackend::new(90, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
+        terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buf: &Buffer) -> String {
+        buf.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    fn rendered(app: &App) -> String {
+        text_of(&buffer_of(app))
     }
 
     #[test]
@@ -566,7 +693,7 @@ mod tests {
                 icon_ref: None,
                 ts: 1_781_210_399_000,
             }),
-            demo: false,
+            ..App::default()
         };
         let out = rendered(&app);
         assert!(out.contains("Tailscale"));
@@ -627,15 +754,92 @@ mod tests {
         assert!(!app.recent.is_empty());
     }
 
+    // ---- theming -----------------------------------------------------------
+
+    #[test]
+    fn every_theme_renders_without_panicking() {
+        for theme in Theme::all() {
+            let mut app = demo_app();
+            app.set_theme(theme);
+            let out = rendered(&app);
+            assert!(out.contains("kickbacks"), "theme {:?} lost content", theme);
+            assert!(out.contains("TOP ADVERTISERS"));
+        }
+    }
+
+    #[test]
+    fn painted_theme_fills_the_canvas() {
+        // Dark/light paint a background, so the top-left cell carries the
+        // palette's bg color rather than the terminal default. This is the fix
+        // for the washed-out-on-a-light-terminal bug.
+        for theme in [Theme::Dark, Theme::Light] {
+            let mut app = demo_app();
+            app.set_theme(theme);
+            let buf = buffer_of(&app);
+            let bg = app.palette.bg.unwrap();
+            assert_eq!(buf.content[0].bg, bg, "theme {:?} did not paint", theme);
+        }
+    }
+
+    #[test]
+    fn terminal_theme_inherits_the_background() {
+        let mut app = demo_app();
+        app.set_theme(Theme::Terminal);
+        let buf = buffer_of(&app);
+        // No painted canvas: the cell keeps the default (reset) background.
+        assert_eq!(buf.content[0].bg, Color::Reset);
+    }
+
+    #[test]
+    fn theme_label_is_shown_in_the_keybind_line() {
+        let mut app = demo_app();
+        app.set_theme(Theme::Light);
+        assert!(rendered(&app).contains("theme: light"));
+    }
+
+    #[test]
+    fn picker_overlay_lists_themes() {
+        let mut app = demo_app();
+        app.picker = Some(ThemePicker::open(app.theme));
+        let out = rendered(&app);
+        assert!(out.contains("choose a theme"));
+        assert!(out.contains("auto"));
+        assert!(out.contains("light"));
+        assert!(out.contains("terminal"));
+        assert!(out.contains("enter save"));
+    }
+
+    #[test]
+    fn picker_cursor_starts_on_current_theme() {
+        let picker = ThemePicker::open(Theme::Light);
+        assert_eq!(picker.selected(), Theme::Light);
+        let picker = ThemePicker::open(Theme::Terminal);
+        assert_eq!(picker.selected(), Theme::Terminal);
+    }
+
+    #[test]
+    fn picker_navigation_is_clamped() {
+        let mut picker = ThemePicker::open(Theme::Auto); // cursor 0
+        picker.up();
+        assert_eq!(picker.cursor, 0);
+        for _ in 0..10 {
+            picker.down();
+        }
+        assert_eq!(picker.cursor, picker.options.len() - 1);
+    }
+
     /// Not a test: a generator for the README hero image. Run explicitly with
     /// `cargo test --release -- --ignored generate_readme_svg`. Writes
-    /// `media/kbtop.svg` from the demo dashboard.
+    /// `media/kbtop.svg` from the demo dashboard. Always uses the dark theme so
+    /// the hero stays consistent.
     #[test]
     #[ignore = "asset generator, run manually"]
     fn generate_readme_svg() {
+        let mut app = demo_app();
+        app.set_theme(Theme::Dark);
         let backend = TestBackend::new(86, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| ui(f, &demo_app())).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
         let svg = crate::svg::buffer_to_svg(terminal.backend().buffer());
         std::fs::create_dir_all("media").unwrap();
         std::fs::write("media/kbtop.svg", svg).unwrap();

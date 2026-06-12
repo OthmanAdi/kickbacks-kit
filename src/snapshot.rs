@@ -13,8 +13,10 @@ use ratatui::Terminal;
 
 use crate::archive::Archive;
 use crate::capture::capture_pass;
+use crate::config;
 use crate::paths;
 use crate::render::{ui, App};
+use crate::theme::Theme;
 
 const DEFAULT_WIDTH: u16 = 100;
 const MIN_WIDTH: u16 = 80;
@@ -23,10 +25,12 @@ const HEIGHT: u16 = 30;
 
 /// Capture once, then print the dashboard. Color is used when stdout is a
 /// terminal; `plain` forces it off (useful when piping into another tool).
-pub fn run(width: Option<u16>, plain: bool) -> Result<()> {
+/// `theme_arg` is the `--theme` flag; when absent the saved config decides.
+pub fn run(width: Option<u16>, plain: bool, theme_arg: Option<Theme>) -> Result<()> {
     let mut archive = Archive::open(&paths::db_path()?)?;
     capture_pass(&mut archive)?;
     let mut app = App::default();
+    app.set_theme(theme_arg.unwrap_or_else(|| config::load().theme));
     app.refresh(&archive)?;
 
     let width = width
@@ -75,6 +79,7 @@ fn buffer_to_ansi(buf: &Buffer) -> String {
             let cell = &buf.content[(y as usize) * area.width as usize + x as usize];
             let style = sgr(
                 cell.fg,
+                cell.bg,
                 cell.modifier.contains(Modifier::BOLD),
                 cell.modifier.contains(Modifier::ITALIC),
             );
@@ -90,11 +95,16 @@ fn buffer_to_ansi(buf: &Buffer) -> String {
 }
 
 /// The SGR escape selecting this cell's style, always starting from a reset so
-/// runs are self-contained.
-fn sgr(fg: Color, bold: bool, italic: bool) -> String {
+/// runs are self-contained. Emits the background only when the palette paints
+/// one (a truecolor cell background); the terminal-native theme leaves it
+/// unset so the terminal's own background shows through.
+fn sgr(fg: Color, bg: Color, bold: bool, italic: bool) -> String {
     let mut s = String::from("\x1b[0m");
     if let Color::Rgb(r, g, b) = fg {
         s.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
+    }
+    if let Color::Rgb(r, g, b) = bg {
+        s.push_str(&format!("\x1b[48;2;{r};{g};{b}m"));
     }
     if bold {
         s.push_str("\x1b[1m");
@@ -130,5 +140,23 @@ mod tests {
     fn snapshot_respects_width() {
         let out = render_to_string(&demo_app(), 80, 30, false).unwrap();
         assert!(out.lines().all(|l| l.chars().count() <= 80));
+    }
+
+    #[test]
+    fn colored_snapshot_paints_dark_background() {
+        // The dark theme paints its canvas, so a colored snapshot carries the
+        // truecolor background escape. This is what makes the snapshot look the
+        // same on a light terminal.
+        let out = render_to_string(&demo_app(), 100, 30, true).unwrap();
+        assert!(out.contains("\x1b[48;2;13;17;23m"));
+    }
+
+    #[test]
+    fn terminal_theme_snapshot_has_no_background_fill() {
+        let mut app = demo_app();
+        app.set_theme(crate::theme::Theme::Terminal);
+        let out = render_to_string(&app, 100, 30, true).unwrap();
+        assert!(!out.contains("\x1b[48;2;"));
+        assert!(out.contains("NOW PLAYING"));
     }
 }

@@ -8,6 +8,7 @@
 
 mod archive;
 mod capture;
+mod config;
 mod doctor;
 mod export;
 mod install_claude;
@@ -22,6 +23,7 @@ mod statusline;
 /// Test-only: renders a buffer to SVG for the README hero image.
 #[cfg(test)]
 mod svg;
+mod theme;
 mod top;
 mod util;
 mod watch;
@@ -54,6 +56,9 @@ enum Command {
         /// Dev-only: render sample data for screenshots (no capture, no writes)
         #[arg(long, hide = true)]
         demo: bool,
+        /// Color theme: auto (detect), dark, light, or terminal (use terminal colors)
+        #[arg(long, value_enum)]
+        theme: Option<theme::Theme>,
     },
     /// Headless capture daemon: poll local artifacts into the archive
     Watch {
@@ -86,6 +91,9 @@ enum Command {
         /// Disable colors even on a terminal
         #[arg(long)]
         plain: bool,
+        /// Color theme: auto (detect), dark, light, or terminal (use terminal colors)
+        #[arg(long, value_enum)]
+        theme: Option<theme::Theme>,
     },
     /// One-line status for a CLI status bar: the current ad plus kb stats
     Statusline {
@@ -139,17 +147,21 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.command {
-        Command::Top { demo } => {
+        Command::Top { demo, theme } => {
             if demo {
-                top::run_demo()
+                top::run_demo(theme)
             } else {
-                top::run()
+                top::run(theme)
             }
         }
         Command::Watch { interval, once } => watch::run(interval, once),
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),
-        Command::Snapshot { width, plain } => snapshot::run(width, plain),
+        Command::Snapshot {
+            width,
+            plain,
+            theme,
+        } => snapshot::run(width, plain, theme),
         Command::Statusline { width, plain } => statusline::run(width, plain),
         Command::Status => status::run(),
         Command::Setup => setup::run(),

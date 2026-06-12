@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0]
+
+### Added
+* Theming for the dashboard. A new `--theme` flag on `kb top` and `kb snapshot`
+  takes `auto`, `dark`, `light`, or `terminal`:
+  * `dark` and `light` paint their own canvas (so the dashboard reads the same
+    on any terminal). The light palette is tuned to clear WCAG AA contrast.
+  * `terminal` drops the truecolor palette and uses the terminal's own colors
+    and background, so it adopts whatever scheme you already run.
+  * `auto` detects a light or dark terminal from `COLORFGBG` and falls back to
+    the (painted) dark canvas when nothing reports it.
+* A live theme picker in `kb top`: press `t`, arrow through the options with a
+  live preview behind the overlay, Enter to save, Esc to revert. The choice
+  persists to a small config file (`KICKBACKS_KIT_CONFIG`, default
+  `<config-dir>/kickbacks-kit/config.json`).
+
+### Fixed
+* `kb top` was washed out on a light terminal: the palette was seven hardcoded
+  dark colors and nothing painted the background, so the near-white text and
+  muted grays vanished. The dashboard now paints its canvas (dark and light
+  themes) or adopts the terminal's colors (terminal theme).
+
+### Changed
+* The 24 hour activity query buckets sightings in SQLite (`GROUP BY` hour)
+  instead of pulling every row into memory on each render tick, so the cost no
+  longer grows with the size of the sightings table.
+* `kb archive stats` (and the totals on every dashboard tick and status line)
+  now runs two queries instead of seven, with a single pass over the sightings
+  table for the total and both time windows.
+
 ## [0.2.0]
 
 ### Added

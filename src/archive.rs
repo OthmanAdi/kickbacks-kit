@@ -217,43 +217,44 @@ impl Archive {
     // ---- reads ------------------------------------------------------------
 
     /// Compute summary statistics relative to `now_ms`.
+    ///
+    /// Two round-trips rather than seven: one aggregate over `ads`, and a
+    /// single pass over `sightings` that counts the total and both time windows
+    /// at once. `stats` runs on every `kb statusline` invocation and every
+    /// `kb top` tick, so collapsing the per-query overhead and the repeated
+    /// `sightings` scan is worth it as the corpus grows.
     pub fn stats(&self, now_ms: i64) -> Result<Stats> {
         let day_ago = now_ms - 24 * 60 * 60 * 1000;
         let week_ago = now_ms - 7 * 24 * 60 * 60 * 1000;
 
-        let distinct_ads = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM ads", [], |r| r.get(0))?;
-        let advertisers =
-            self.conn
-                .query_row("SELECT COUNT(DISTINCT advertiser) FROM ads", [], |r| {
-                    r.get(0)
-                })?;
-        let total_sightings = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM sightings", [], |r| r.get(0))?;
-        let sightings_today = self.conn.query_row(
-            "SELECT COUNT(*) FROM sightings WHERE observed_ms >= ?1",
-            params![day_ago],
-            |r| r.get(0),
+        let (distinct_ads, advertisers, first_seen_ms, last_seen_ms) = self.conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT advertiser), MIN(first_seen_ms), MAX(last_seen_ms)
+             FROM ads",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            },
         )?;
-        let sightings_week = self.conn.query_row(
-            "SELECT COUNT(*) FROM sightings WHERE observed_ms >= ?1",
-            params![week_ago],
-            |r| r.get(0),
+
+        let (total_sightings, sightings_today, sightings_week) = self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN observed_ms >= ?1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN observed_ms >= ?2 THEN 1 ELSE 0 END), 0)
+             FROM sightings",
+            params![day_ago, week_ago],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )?;
-        let first_seen_ms = self
-            .conn
-            .query_row("SELECT MIN(first_seen_ms) FROM ads", [], |r| {
-                r.get::<_, Option<i64>>(0)
-            })
-            .unwrap_or(None);
-        let last_seen_ms = self
-            .conn
-            .query_row("SELECT MAX(last_seen_ms) FROM ads", [], |r| {
-                r.get::<_, Option<i64>>(0)
-            })
-            .unwrap_or(None);
 
         Ok(Stats {
             distinct_ads,
@@ -335,18 +336,26 @@ impl Archive {
             }
         }
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT observed_ms FROM sightings WHERE observed_ms >= ?1")?;
-        let times = stmt
-            .query_map(params![start], |r| r.get::<_, i64>(0))?
+        // Bucket the sightings in SQLite rather than materializing every row
+        // into Rust: this runs on every `kb top` render tick, and the sightings
+        // table grows without bound, so the aggregate keeps the result set to at
+        // most `hours` rows instead of one row per sighting.
+        let mut stmt = self.conn.prepare(
+            "SELECT (observed_ms / ?1) * ?1 AS hour_ms, COUNT(*) AS cnt
+             FROM sightings WHERE observed_ms >= ?2
+             GROUP BY hour_ms",
+        )?;
+        let counts = stmt
+            .query_map(params![HOUR_MS, start], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for t in times {
-            let idx = ((t - start) / HOUR_MS) as usize;
+        for (hour, cnt) in counts {
+            let idx = ((hour - start) / HOUR_MS) as usize;
             if idx < hours {
                 // A recorded sighting proves we were watching that hour, even
                 // for archives that predate the coverage table.
-                buckets[idx] = Some(buckets[idx].unwrap_or(0) + 1);
+                buckets[idx] = Some(buckets[idx].unwrap_or(0) + cnt as u64);
             }
         }
         Ok(buckets)
@@ -425,6 +434,37 @@ mod tests {
         let board = a.advertiser_leaderboard(10).unwrap();
         assert_eq!(board[0].advertiser, "Tailscale");
         assert_eq!(board[0].sightings, 2);
+    }
+
+    #[test]
+    fn stats_windows_today_and_week() {
+        let mut a = Archive::open_in_memory().unwrap();
+        let now = 100 * 24 * HOUR_MS; // day 100, midnight
+        let day = 24 * HOUR_MS;
+        // observed within the last day, within the last week, and older.
+        a.capture_ad(&ad("A", "https://a.com/", 1), now - HOUR_MS)
+            .unwrap();
+        a.capture_ad(&ad("B", "https://b.com/", 2), now - 3 * day)
+            .unwrap();
+        a.capture_ad(&ad("C", "https://c.com/", 3), now - 10 * day)
+            .unwrap();
+        let s = a.stats(now).unwrap();
+        assert_eq!(s.total_sightings, 3);
+        assert_eq!(s.sightings_today, 1);
+        assert_eq!(s.sightings_week, 2);
+        assert_eq!(s.distinct_ads, 3);
+        assert_eq!(s.advertisers, 3);
+    }
+
+    #[test]
+    fn stats_empty_archive_is_zeroed() {
+        let a = Archive::open_in_memory().unwrap();
+        let s = a.stats(1_000_000).unwrap();
+        assert_eq!(s.distinct_ads, 0);
+        assert_eq!(s.total_sightings, 0);
+        assert_eq!(s.sightings_today, 0);
+        assert_eq!(s.first_seen_ms, None);
+        assert_eq!(s.last_seen_ms, None);
     }
 
     #[test]
