@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragra
 use ratatui::Frame;
 
 use crate::archive::{AdvertiserStat, Archive, Stats};
+use crate::chart::ChartStyle;
 use crate::model::{host_of, AdRow, CliAd};
 use crate::sources::{self, LiveState};
 use crate::theme::{Palette, Theme};
@@ -89,6 +90,8 @@ pub struct App {
     pub theme: Theme,
     /// Concrete colors to draw with, derived from `theme`.
     pub palette: Palette,
+    /// The activity chart style for the sightings panel.
+    pub chart_style: ChartStyle,
     /// Some while the theme picker overlay is open.
     pub picker: Option<ThemePicker>,
 }
@@ -250,7 +253,7 @@ pub fn ui(frame: &mut Frame, app: &App) {
         .padding(Padding::new(1, 1, 0, 0))
         .title_top(brand_title(pal, app.demo))
         .title_top(status_chips(pal, &app.live).right_aligned())
-        .title_bottom(keybinds_line(pal, app.theme))
+        .title_bottom(keybinds_line(pal, app.theme, app.chart_style))
         .title_bottom(ethic_line(pal).right_aligned());
 
     let inner = outer.inner(area);
@@ -306,14 +309,16 @@ fn chip(pal: &Palette, on: bool, yes: &str, no: &str) -> Span<'static> {
     }
 }
 
-fn keybinds_line(pal: &Palette, theme: Theme) -> Line<'static> {
+fn keybinds_line(pal: &Palette, theme: Theme, chart: ChartStyle) -> Line<'static> {
     Line::from(vec![
         Span::styled(" q ", fg(pal.gold)),
         Span::styled("quit  ", fg(pal.dim)),
         Span::styled("r ", fg(pal.gold)),
         Span::styled("refresh  ", fg(pal.dim)),
         Span::styled("t ", fg(pal.gold)),
-        Span::styled(format!("theme: {} ", theme.label()), fg(pal.dim)),
+        Span::styled(format!("theme: {}  ", theme.label()), fg(pal.dim)),
+        Span::styled("c ", fg(pal.gold)),
+        Span::styled(format!("chart: {} ", chart.label()), fg(pal.dim)),
     ])
 }
 
@@ -460,20 +465,28 @@ fn render_sparkline(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(hint, body);
         return;
     }
-    let has_gaps = app.sparkline.iter().any(Option::is_none);
+    match app.chart_style {
+        ChartStyle::Heat => {
+            frame.render_widget(Paragraph::new(heat_strip(&app.sparkline, body, pal)), body);
+        }
+        ChartStyle::Bars => render_bars(frame, body, &app.sparkline, pal),
+    }
+}
+
+/// The block-bar chart: bars on a continuous baseline floor, with a one-line
+/// legend split off below when there are gaps to explain.
+fn render_bars(frame: &mut Frame, body: Rect, data: &[Option<u64>], pal: &Palette) {
+    let has_gaps = data.iter().any(Option::is_none);
     let (spark_area, legend_area) = if has_gaps && body.height > 1 {
         let parts = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(body);
         (parts[0], Some(parts[1]))
     } else {
         (body, None)
     };
-    frame.render_widget(
-        Paragraph::new(bars(&app.sparkline, spark_area, pal)),
-        spark_area,
-    );
+    frame.render_widget(Paragraph::new(bars(data, spark_area, pal)), spark_area);
     if let Some(legend) = legend_area {
         let note = Paragraph::new(Line::from(Span::styled(
-            "░ hours kb was not watching",
+            "╌ gap · ─ watched, quiet",
             fg(pal.dim).add_modifier(Modifier::ITALIC),
         )));
         frame.render_widget(note, legend);
@@ -505,11 +518,11 @@ fn bar_cell(col_eighths: u16, row_from_bottom: u16) -> Option<&'static str> {
     Some(BAR_BLOCKS[local as usize - 1])
 }
 
-/// Build the activity chart. Observed hours rise as gold bars scaled to the
-/// busiest hour; unobserved hours show a single dim baseline mark instead of a
-/// full-height shaded slab, which is what turned the old chart into a wall of
-/// gray when most hours had no data. Watched-but-quiet hours (`Some(0)`) stay
-/// blank, so they read differently from unobserved ones.
+/// Build the bar chart. Observed hours rise as gold bars scaled to the busiest
+/// hour, standing on a continuous baseline floor so even a single bar reads as
+/// a data point on an axis, never a stick floating in a void. The floor breaks
+/// (`╌`) where kb was not watching and stays solid (`─`) for watched-but-quiet
+/// hours, so the three states are distinct without any shaded slab.
 fn bars(data: &[Option<u64>], area: Rect, pal: &Palette) -> Vec<Line<'static>> {
     let w = (area.width as usize).min(data.len());
     let h = area.height.max(1);
@@ -524,17 +537,129 @@ fn bars(data: &[Option<u64>], area: Rect, pal: &Palette) -> Vec<Line<'static>> {
         let mut spans = Vec::with_capacity(w);
         for &hour in visible {
             match hour {
-                None if row == 0 => spans.push(Span::styled("░", fg(pal.dim))),
+                // A bar's own bottom block is its floor, so no extra rule under it.
                 Some(v) if v > 0 => match bar_cell(column_eighths(v, max, h), row) {
                     Some(block) => spans.push(Span::styled(block, fg(pal.gold))),
                     None => spans.push(Span::raw(" ")),
                 },
+                None if row == 0 => spans.push(Span::styled("╌", fg(pal.dim))),
+                Some(0) if row == 0 => spans.push(Span::styled("─", fg(pal.dim))),
                 _ => spans.push(Span::raw(" ")),
             }
         }
         lines.push(Line::from(spans));
     }
     lines
+}
+
+/// Shade glyphs for the heat ramp on a named-color (terminal) theme, where
+/// there is no truecolor to lerp through.
+const HEAT_SHADES: [&str; 4] = ["░", "▒", "▓", "█"];
+
+fn is_rgb(c: Color) -> bool {
+    matches!(c, Color::Rgb(..))
+}
+
+/// Color for an observed hour on a truecolor theme: a lerp from `dim` toward
+/// `gold` by the hour's share of the busiest hour. The faintest live hour still
+/// sits about 30% toward gold, so it always reads heavier than a quiet sliver.
+fn ramp_color(pal: &Palette, value: u64, max: u64) -> Color {
+    match (pal.dim, pal.gold) {
+        (Color::Rgb(dr, dg, db), Color::Rgb(gr, gg, gb)) => {
+            let frac = if max <= 1 {
+                1.0
+            } else {
+                value as f64 / max as f64
+            };
+            let t = 0.30 + 0.70 * frac.clamp(0.0, 1.0);
+            let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+            Color::Rgb(lerp(dr, gr), lerp(dg, gg), lerp(db, gb))
+        }
+        _ => pal.gold,
+    }
+}
+
+/// Heat glyph for an observed hour on a named-color theme, by quartile of the
+/// busiest hour.
+fn heat_glyph(value: u64, max: u64) -> &'static str {
+    if max == 0 {
+        return HEAT_SHADES[0];
+    }
+    let q = (value * 4).div_ceil(max).clamp(1, 4) as usize;
+    HEAT_SHADES[q - 1]
+}
+
+/// The calendar heat strip: one cell per hour, color carrying intensity. Reads
+/// the same whether one hour or all twenty-four have data, which is the whole
+/// point. Renders the strip, then hour ticks and a legend if the rows are free,
+/// trimming from the bottom up when the area is short.
+fn heat_strip(data: &[Option<u64>], area: Rect, pal: &Palette) -> Vec<Line<'static>> {
+    let w = (area.width as usize).min(data.len());
+    if w == 0 {
+        return Vec::new();
+    }
+    let visible = &data[data.len() - w..];
+    let max = visible.iter().filter_map(|v| *v).max().unwrap_or(0);
+    let truecolor = is_rgb(pal.gold) && is_rgb(pal.dim);
+
+    let cells: Vec<Span> = visible
+        .iter()
+        .map(|hour| match *hour {
+            None => Span::styled("·", fg(pal.dim)),
+            Some(0) => Span::styled("▕", fg(pal.dim)),
+            Some(v) if truecolor => {
+                let mut style = fg(ramp_color(pal, v, max));
+                if v == max {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                Span::styled("█", style)
+            }
+            Some(v) => {
+                let color = if v * 4 <= max { pal.dim } else { pal.gold };
+                Span::styled(heat_glyph(v, max), fg(color))
+            }
+        })
+        .collect();
+
+    let mut lines = vec![Line::from(cells)];
+    // Hour ticks only when every hour gets its own column, so they line up.
+    if (area.height as usize) > lines.len() && w == data.len() {
+        lines.push(tick_line(w, pal));
+    }
+    if (area.height as usize) > lines.len() {
+        lines.push(heat_legend(area.width, pal));
+    }
+    lines
+}
+
+/// A row of relative hour offsets (0, 6, 12, 18 from the oldest hour shown).
+fn tick_line(w: usize, pal: &Palette) -> Line<'static> {
+    let mut cells = vec![' '; w];
+    for (col, label) in [(0usize, "0"), (6, "6"), (12, "12"), (18, "18")] {
+        for (i, ch) in label.chars().enumerate() {
+            if col + i < w {
+                cells[col + i] = ch;
+            }
+        }
+    }
+    Line::from(Span::styled(
+        cells.into_iter().collect::<String>(),
+        fg(pal.dim),
+    ))
+}
+
+/// The heat legend: how the three hour states read.
+fn heat_legend(width: u16, pal: &Palette) -> Line<'static> {
+    let dim_italic = fg(pal.dim).add_modifier(Modifier::ITALIC);
+    let mut spans = vec![
+        Span::styled("· none  ", dim_italic),
+        Span::styled("▕ quiet  ", dim_italic),
+    ];
+    if width >= 28 {
+        spans.push(Span::styled("░▒▓█", fg(pal.gold)));
+        spans.push(Span::styled(" busier", dim_italic));
+    }
+    Line::from(spans)
 }
 
 fn render_leaderboard(frame: &mut Frame, area: Rect, app: &App) {
@@ -755,15 +880,17 @@ mod tests {
     }
 
     #[test]
-    fn sparkline_gaps_render_as_not_watching() {
+    fn bars_style_marks_gaps_on_the_baseline() {
         let app = App {
             now_ms: 1_781_210_400_000,
-            sparkline: vec![None, Some(2), None, Some(4)],
+            sparkline: vec![None, Some(2), Some(0), Some(4)],
+            chart_style: ChartStyle::Bars,
             ..App::default()
         };
         let out = rendered(&app);
-        assert!(out.contains("░"));
-        assert!(out.contains("hours kb was not watching"));
+        assert!(out.contains("╌"), "gaps mark the floor");
+        assert!(out.contains("gap"), "legend explains the floor");
+        assert!(!out.contains('░'), "no shaded slab anywhere");
     }
 
     #[test]
@@ -793,10 +920,10 @@ mod tests {
     }
 
     #[test]
-    fn gaps_only_mark_the_baseline_not_full_height() {
+    fn bars_gaps_only_mark_the_baseline_not_full_height() {
         // Mostly unobserved with one tall bar. Gap columns must show a single
         // baseline mark, never a full-height shaded slab (the old ugliness):
-        // the shade-char count stays near one row, not rows times columns.
+        // the floor-char count stays near one row, not rows times columns.
         let app = App {
             now_ms: 1,
             sparkline: {
@@ -804,12 +931,14 @@ mod tests {
                 d[23] = Some(10);
                 d
             },
+            chart_style: ChartStyle::Bars,
             ..App::default()
         };
         let text = rendered(&app);
         assert!(text.contains("█"), "the data bar should render");
-        let shades = text.matches('░').count();
-        assert!(shades <= 30, "shade slab regression: {shades}");
+        assert!(!text.contains('░'), "no shaded slab");
+        let floor = text.matches('╌').count();
+        assert!(floor <= 24, "floor should be one row: {floor}");
     }
 
     #[test]
@@ -843,16 +972,65 @@ mod tests {
         assert!(!app.recent.is_empty());
     }
 
+    // ---- chart styles ------------------------------------------------------
+
+    /// Flatten a single rendered line back to text (test helper).
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn heat_strip_marks_three_states_distinctly() {
+        // On a truecolor theme: a gap, a quiet hour, and a sighting each render
+        // with their own glyph, and the strip itself carries no shaded slab.
+        // Height 1 so only the strip row is built (no ticks, no legend swatch).
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 1,
+        };
+        let lines = heat_strip(&[None, Some(0), Some(5)], area, &Palette::dark());
+        let strip = line_text(&lines[0]);
+        assert!(strip.contains('·'), "gap mark");
+        assert!(strip.contains('▕'), "quiet mark");
+        assert!(strip.contains('█'), "sighting cell");
+        assert!(!strip.contains('░'), "no slab in the strip");
+    }
+
+    #[test]
+    fn heat_renders_one_cell_per_observed_hour() {
+        // Honesty: exactly one filled cell per Some(n>0) hour, nothing invented.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 1,
+        };
+        let data = [Some(2), None, Some(0), Some(5), None, Some(1)];
+        let lines = heat_strip(&data, area, &Palette::dark());
+        let blocks = line_text(&lines[0]).matches('█').count();
+        assert_eq!(blocks, 3, "one cell per observed hour");
+    }
+
     // ---- theming -----------------------------------------------------------
 
     #[test]
-    fn every_theme_renders_without_panicking() {
+    fn every_theme_and_chart_style_renders_without_panicking() {
         for theme in Theme::all() {
-            let mut app = demo_app();
-            app.set_theme(theme);
-            let out = rendered(&app);
-            assert!(out.contains("kickbacks"), "theme {:?} lost content", theme);
-            assert!(out.contains("TOP ADVERTISERS"));
+            for style in [ChartStyle::Heat, ChartStyle::Bars] {
+                let mut app = demo_app();
+                app.set_theme(theme);
+                app.chart_style = style;
+                let out = rendered(&app);
+                assert!(
+                    out.contains("kickbacks"),
+                    "theme {:?} / chart {:?} lost content",
+                    theme,
+                    style
+                );
+                assert!(out.contains("TOP ADVERTISERS"));
+            }
         }
     }
 

@@ -8,6 +8,7 @@
 
 mod archive;
 mod capture;
+mod chart;
 mod config;
 mod doctor;
 mod export;
@@ -59,6 +60,9 @@ enum Command {
         /// Color theme: auto (detect), dark, light, or terminal (use terminal colors)
         #[arg(long, value_enum)]
         theme: Option<theme::Theme>,
+        /// Activity chart style: heat (calendar strip) or bars
+        #[arg(long, value_enum)]
+        chart_style: Option<chart::ChartStyle>,
     },
     /// Headless capture daemon: poll local artifacts into the archive
     Watch {
@@ -94,6 +98,9 @@ enum Command {
         /// Color theme: auto (detect), dark, light, or terminal (use terminal colors)
         #[arg(long, value_enum)]
         theme: Option<theme::Theme>,
+        /// Activity chart style: heat (calendar strip) or bars
+        #[arg(long, value_enum)]
+        chart_style: Option<chart::ChartStyle>,
     },
     /// One-line status for a CLI status bar: the current ad plus kb stats
     Statusline {
@@ -147,11 +154,15 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     match cli.command {
-        Command::Top { demo, theme } => {
+        Command::Top {
+            demo,
+            theme,
+            chart_style,
+        } => {
             if demo {
-                top::run_demo(theme)
+                top::run_demo(theme, chart_style)
             } else {
-                top::run(theme)
+                top::run(theme, chart_style)
             }
         }
         Command::Watch { interval, once } => watch::run(interval, once),
@@ -161,7 +172,8 @@ fn main() -> Result<()> {
             width,
             plain,
             theme,
-        } => snapshot::run(width, plain, theme),
+            chart_style,
+        } => snapshot::run(width, plain, theme, chart_style),
         Command::Statusline { width, plain } => statusline::run(width, plain),
         Command::Status => status::run(),
         Command::Setup => setup::run(),

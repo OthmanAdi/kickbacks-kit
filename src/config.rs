@@ -12,14 +12,19 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::chart::ChartStyle;
 use crate::theme::Theme;
 
-/// Persisted user preferences.
+/// Persisted user preferences. Every field has a serde default, so a config
+/// written by an older build (missing a field) still loads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Dashboard theme for `kb top` and `kb snapshot`.
     #[serde(default = "default_theme")]
     pub theme: Theme,
+    /// Activity chart style for the sightings panel.
+    #[serde(default)]
+    pub chart_style: ChartStyle,
 }
 
 /// First-run default: detect the terminal background rather than imposing a
@@ -32,6 +37,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             theme: default_theme(),
+            chart_style: ChartStyle::default(),
         }
     }
 }
@@ -94,12 +100,31 @@ mod tests {
 
         save(&Config {
             theme: Theme::Light,
+            chart_style: ChartStyle::Bars,
         })
         .unwrap();
-        assert_eq!(load().theme, Theme::Light);
+        let loaded = load();
+        assert_eq!(loaded.theme, Theme::Light);
+        assert_eq!(loaded.chart_style, ChartStyle::Bars);
 
         std::env::remove_var("KICKBACKS_KIT_CONFIG");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn config_without_chart_style_field_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let file =
+            std::env::temp_dir().join(format!("kb-config-legacy-{}.json", std::process::id()));
+        std::env::set_var("KICKBACKS_KIT_CONFIG", &file);
+        // A config written by an older build, before chart_style existed.
+        std::fs::write(&file, r#"{"theme":"dark"}"#).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.theme, Theme::Dark);
+        assert_eq!(loaded.chart_style, ChartStyle::default());
+
+        std::env::remove_var("KICKBACKS_KIT_CONFIG");
+        std::fs::remove_file(&file).ok();
     }
 
     #[test]

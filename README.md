@@ -10,7 +10,7 @@ a local ad archive plus a Rust TUI dashboard for ad sightings, advertisers, and 
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-77%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen.svg)](#testing)
 [![Read only](https://img.shields.io/badge/read--only-never%20bills-success.svg)](#what-this-is-and-is-not)
 
 <img src="media/kbtop.svg" alt="kickbacks-kit kbtop terminal dashboard for kickbacks.ai showing the current ad, total ads seen, a 24 hour sightings sparkline, the advertiser leaderboard, and recent ads in Claude Code" width="820">
@@ -104,8 +104,8 @@ with `kb uninstall-claude`.
 
 | Command | What it does |
 | :------ | :----------- |
-| `kb top [--theme T]` | Live TUI dashboard. Captures on every tick. Press `t` to pick a theme. |
-| `kb snapshot [--width N] [--plain] [--theme T]` | One-shot dashboard render to stdout. Same view as `kb top`. |
+| `kb top [--theme T] [--chart-style C]` | Live TUI dashboard. Captures on every tick. Press `t` for a theme, `c` for a chart style. |
+| `kb snapshot [--width N] [--plain] [--theme T] [--chart-style C]` | One-shot dashboard render to stdout. Same view as `kb top`. |
 | `kb statusline [--width N] [--plain]` | One status-bar line: the current ad plus your kb stats. |
 | `kb status` | Whether ads are flowing now, and why not (killswitch, idle, signed out). |
 | `kb watch [--interval N] [--once]` | Headless capture loop. Default poll is 3 seconds. |
@@ -136,6 +136,12 @@ stays on the dark canvas, which is readable on a light background too. Pick
 `light` or `terminal` explicitly, or use the picker, to override. Your selection
 is saved to `<config-dir>/kickbacks-kit/config.json` (override with
 `KICKBACKS_KIT_CONFIG`).
+
+The sightings chart has two styles, saved in the same config. `heat` (the
+default) is a calendar strip, one cell per hour colored by how busy it was, and
+stays readable whether one hour or all twenty four have data. `bars` draws block
+bars on a baseline floor when you want to read magnitude as height. Press `c` in
+`kb top` to switch, or pass `--chart-style heat|bars`.
 
 ## How it works
 

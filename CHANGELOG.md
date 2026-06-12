@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2]
+
+### Added
+* A selectable activity chart, defaulting to a "heat" calendar strip. The
+  sightings panel now draws one cell per hour across a fixed 24 hour row,
+  colored by intensity (a dim to gold ramp on color themes, shaded glyphs on
+  the terminal theme), with a faint mark for hours kb was not watching. It
+  reads the same whether one hour or all twenty four have data, which the old
+  chart did not.
+* A "bars" chart style alongside it: block bars on a continuous baseline floor,
+  so a single busy hour stands on an axis instead of floating. Press `c` in
+  `kb top` to switch (it persists next to the theme), or pass
+  `--chart-style heat|bars` to `kb top` and `kb snapshot`.
+
+### Fixed
+* The activity chart was unreadable with sparse data: unobserved hours rendered
+  as chunky shaded blocks and a lone busy hour looked like a floating stick.
+  Both chart styles now handle one to twenty four hours of data cleanly, with
+  no shaded slab.
+
 ## [0.3.1]
 
 ### Fixed

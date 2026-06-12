@@ -16,18 +16,21 @@ use ratatui::DefaultTerminal;
 
 use crate::archive::Archive;
 use crate::capture::capture_pass;
+use crate::chart::ChartStyle;
 use crate::config::{self, Config};
 use crate::paths;
 use crate::render::{demo_app, ui, App, ThemePicker};
 use crate::theme::Theme;
 
 /// Entry point: set up the terminal, run the loop, and always restore on exit.
-/// `theme_arg` is the `--theme` flag; when absent the saved config decides.
-pub fn run(theme_arg: Option<Theme>) -> Result<()> {
+/// `theme_arg`/`chart_arg` are the flags; when absent the saved config decides.
+pub fn run(theme_arg: Option<Theme>, chart_arg: Option<ChartStyle>) -> Result<()> {
     let mut archive = Archive::open(&paths::db_path()?)?;
-    let theme = theme_arg.unwrap_or_else(|| config::load().theme);
+    let cfg = config::load();
+    let theme = theme_arg.unwrap_or(cfg.theme);
+    let chart = chart_arg.unwrap_or(cfg.chart_style);
     let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal, &mut archive, theme);
+    let result = run_loop(&mut terminal, &mut archive, theme, chart);
     ratatui::restore();
     result
 }
@@ -35,9 +38,12 @@ pub fn run(theme_arg: Option<Theme>) -> Result<()> {
 /// Render the dashboard with built-in sample data, so the layout can be seen
 /// without waiting for real ads. Touches no archive and writes nothing, so the
 /// theme picker here previews but never persists.
-pub fn run_demo(theme_arg: Option<Theme>) -> Result<()> {
+pub fn run_demo(theme_arg: Option<Theme>, chart_arg: Option<ChartStyle>) -> Result<()> {
     let mut app = demo_app();
     app.set_theme(theme_arg.unwrap_or(Theme::Dark));
+    if let Some(chart) = chart_arg {
+        app.chart_style = chart;
+    }
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         loop {
@@ -56,9 +62,15 @@ pub fn run_demo(theme_arg: Option<Theme>) -> Result<()> {
     result
 }
 
-fn run_loop(terminal: &mut DefaultTerminal, archive: &mut Archive, theme: Theme) -> Result<()> {
+fn run_loop(
+    terminal: &mut DefaultTerminal,
+    archive: &mut Archive,
+    theme: Theme,
+    chart: ChartStyle,
+) -> Result<()> {
     let mut app = App::default();
     app.set_theme(theme);
+    app.chart_style = chart;
     capture_pass(archive)?;
     app.refresh(archive)?;
     let mut last_tick = Instant::now();
@@ -108,6 +120,15 @@ fn handle_key(app: &mut App, key: event::KeyEvent, persist: bool) -> bool {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return true,
         KeyCode::Char('t') => app.picker = Some(ThemePicker::open(app.theme)),
+        KeyCode::Char('c') => {
+            app.chart_style = app.chart_style.next();
+            if persist {
+                let _ = config::save(&Config {
+                    theme: app.theme,
+                    chart_style: app.chart_style,
+                });
+            }
+        }
         _ => {}
     }
     false
@@ -133,7 +154,10 @@ fn handle_picker(app: &mut App, code: KeyCode, persist: bool) {
             if let Some(theme) = app.picker.as_ref().map(ThemePicker::selected) {
                 app.set_theme(theme);
                 if persist {
-                    let _ = config::save(&Config { theme });
+                    let _ = config::save(&Config {
+                        theme,
+                        chart_style: app.chart_style,
+                    });
                 }
             }
             app.picker = None;
@@ -199,6 +223,16 @@ mod tests {
         };
         let ctrl_c = event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(handle_key(&mut app, ctrl_c, false));
+    }
+
+    #[test]
+    fn c_cycles_chart_style() {
+        let mut app = App::default();
+        assert_eq!(app.chart_style, ChartStyle::Heat);
+        assert!(!handle_key(&mut app, press(KeyCode::Char('c')), false));
+        assert_eq!(app.chart_style, ChartStyle::Bars);
+        handle_key(&mut app, press(KeyCode::Char('c')), false);
+        assert_eq!(app.chart_style, ChartStyle::Heat);
     }
 
     #[test]

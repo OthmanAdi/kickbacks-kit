@@ -13,6 +13,7 @@ use ratatui::Terminal;
 
 use crate::archive::Archive;
 use crate::capture::capture_pass;
+use crate::chart::ChartStyle;
 use crate::config;
 use crate::paths;
 use crate::render::{ui, App};
@@ -25,12 +26,19 @@ const HEIGHT: u16 = 30;
 
 /// Capture once, then print the dashboard. Color is used when stdout is a
 /// terminal; `plain` forces it off (useful when piping into another tool).
-/// `theme_arg` is the `--theme` flag; when absent the saved config decides.
-pub fn run(width: Option<u16>, plain: bool, theme_arg: Option<Theme>) -> Result<()> {
+/// `theme_arg`/`chart_arg` are the flags; when absent the saved config decides.
+pub fn run(
+    width: Option<u16>,
+    plain: bool,
+    theme_arg: Option<Theme>,
+    chart_arg: Option<ChartStyle>,
+) -> Result<()> {
     let mut archive = Archive::open(&paths::db_path()?)?;
     capture_pass(&mut archive)?;
+    let cfg = config::load();
     let mut app = App::default();
-    app.set_theme(theme_arg.unwrap_or_else(|| config::load().theme));
+    app.set_theme(theme_arg.unwrap_or(cfg.theme));
+    app.chart_style = chart_arg.unwrap_or(cfg.chart_style);
     app.refresh(&archive)?;
 
     let width = width
