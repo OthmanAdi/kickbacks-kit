@@ -13,7 +13,7 @@ kickbacks.ai service bulletin and the upstream project's GitHub activity.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-141%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-142%20passing-brightgreen.svg)](#testing)
 [![Read only](https://img.shields.io/badge/read--only-never%20bills-success.svg)](#what-this-is-and-is-not)
 
 <img src="media/kbtop.svg" alt="kickbacks-kit kbtop terminal dashboard for kickbacks.ai showing the current ad, total ads seen, a 24 hour sightings sparkline, the advertiser leaderboard, and recent ads in Claude Code" width="820">
