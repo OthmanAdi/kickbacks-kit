@@ -51,8 +51,8 @@ struct Cli {
 enum Command {
     /// Live TUI dashboard (captures while open)
     Top {
-        /// Render with sample data instead of your archive (no capture, no writes)
-        #[arg(long)]
+        /// Dev-only: render sample data for screenshots (no capture, no writes)
+        #[arg(long, hide = true)]
         demo: bool,
     },
     /// Headless capture daemon: poll local artifacts into the archive

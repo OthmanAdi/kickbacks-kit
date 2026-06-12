@@ -6,11 +6,11 @@
 Archive every ad you are shown, and watch your stats in a live terminal dashboard.
 
 Track the sponsored ads kickbacks.ai shows in your Claude Code and Codex spinner:
-a local ad archive plus a Rust TUI dashboard for impressions, advertisers, and earnings history.
+a local ad archive plus a Rust TUI dashboard for ad sightings, advertisers, and 24 hour activity.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-14%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen.svg)](#testing)
 [![Read only](https://img.shields.io/badge/read--only-never%20bills-success.svg)](#what-this-is-and-is-not)
 
 <img src="media/kbtop.svg" alt="kickbacks-kit kbtop terminal dashboard for kickbacks.ai showing the current ad, total ads seen, a 24 hour sightings sparkline, the advertiser leaderboard, and recent ads in Claude Code" width="820">
@@ -27,7 +27,7 @@ ad lives in one file, and earnings sit in memory until the next API poll.
 files the extension already writes, records every ad into a small SQLite archive,
 and renders the whole picture in a terminal UI. Nothing leaves your machine.
 
-> The dashboard above runs on `kb top --demo` with sample data. Your real numbers
+> The dashboard above shows sample data, for the screenshot. Your real numbers
 > fill in as you code with the extension running.
 
 ## What this is, and is not
@@ -69,23 +69,44 @@ cargo build --release
 ## Quickstart
 
 ```bash
-kb top --demo # see the dashboard right now, with sample data
 kb setup      # create the archive and capture once
 kb status     # are ads flowing right now, and if not, why
 kb doctor     # confirm the extension files and archive are wired up
 kb top        # live dashboard (also captures while open)
+kb snapshot   # one-shot dashboard render to stdout
 kb watch      # headless capture in a spare terminal
 ```
 
 Leave `kb top` or `kb watch` running while you code. Each new ad rotation is
 recorded once. Polling fast never double counts.
 
+### Inside Claude Code
+
+```bash
+kb install-claude   # add /kbtop and /kbstatus, and wire the status line
+```
+
+This installs two global slash commands and points Claude Code's status line at
+`kb statusline`, a single line that keeps the kickbacks ad and appends your own
+stats next to it:
+
+```
+ad· Ramp - business cards that close themselves  ·  kb 12 today · 17 advs · ● live
+```
+
+An interactive TUI cannot run inside Claude Code's own pane, so `/kbtop` prints a
+one-shot snapshot (`kb snapshot`); run `kb top` in a separate terminal for the
+live version. If the kickbacks extension already owns the status line, the
+installer wraps it rather than replacing it, and keeps a backup. Undo everything
+with `kb uninstall-claude`.
+
 ## Commands
 
 | Command | What it does |
 | :------ | :----------- |
 | `kb top` | Live TUI dashboard. Captures on every tick. |
-| `kb top --demo` | Render the dashboard with sample data. No archive, no writes. |
+| `kb snapshot [--width N] [--plain]` | One-shot dashboard render to stdout. Same view as `kb top`. |
+| `kb statusline [--width N] [--plain]` | One status-bar line: the current ad plus your kb stats. |
 | `kb status` | Whether ads are flowing now, and why not (killswitch, idle, signed out). |
 | `kb watch [--interval N] [--once]` | Headless capture loop. Default poll is 3 seconds. |
 | `kb archive stats` | Summary: ads seen, advertisers, sightings, today, this week. |
@@ -94,6 +115,7 @@ recorded once. Polling fast never double counts.
 | `kb export [--format jsonl\|csv] [--out FILE]` | Dump the corpus. JSONL loads straight into `datasets`. |
 | `kb setup` | First-run: create the archive, capture once. |
 | `kb doctor` | Check the local data sources and the archive. |
+| `kb install-claude` / `kb uninstall-claude` | Add or remove the `/kbtop` and `/kbstatus` commands and the status line. |
 
 ## How it works
 
@@ -157,6 +179,12 @@ No, and that is deliberate. It is read-only. It never posts an impression, view,
 or click, and never contacts the kickbacks.ai backend. The honest way to earn more
 is to do real work with the extension running. This tool just keeps the record.
 
+**Where do I see my actual earnings?**
+On your kickbacks portfolio at [kickbacks.ai/me](https://kickbacks.ai/me). kb does
+not read your balance: that needs the cloud backend, and kb stays read-only and
+offline. The dashboard and `kb status` link you there rather than showing a number
+they cannot verify.
+
 **Do I need to be signed in to kickbacks.ai?**
 No. It reads local files, so it works whether you are signed in or not. Sign-in
 only matters for the earnings the extension itself accrues.
@@ -171,10 +199,13 @@ support is on the roadmap.
 
 ## Roadmap
 
-* Loopback read of live earnings (no token rotation, read only).
 * Anonymized, opt-in public dataset of spinner ad creatives.
 * Codex surface support alongside Claude Code.
 * Per-advertiser detail view in the dashboard.
+
+Reading live earnings was considered and dropped: it would require the
+kickbacks.ai cloud backend, which crosses the read-only line this tool is built
+on. Earnings stay where they belong, on your [portfolio](https://kickbacks.ai/me).
 
 ## Testing
 
