@@ -108,8 +108,7 @@ impl Archive {
         Ok(Self { conn })
     }
 
-    /// Open an in-memory archive (used by tests).
-    #[cfg(test)]
+    /// Open an in-memory archive (used by tests and the demo data path).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;

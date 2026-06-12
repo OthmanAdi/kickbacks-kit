@@ -12,7 +12,9 @@ mod doctor;
 mod export;
 mod model;
 mod paths;
+mod render;
 mod setup;
+mod snapshot;
 mod sources;
 mod status;
 /// Test-only: renders a buffer to SVG for the README hero image.
@@ -74,6 +76,15 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// One-shot dashboard render to stdout (for slash commands and scripts)
+    Snapshot {
+        /// Output width in columns (default: terminal width, clamped 80..=140)
+        #[arg(long)]
+        width: Option<u16>,
+        /// Disable colors even on a terminal
+        #[arg(long)]
+        plain: bool,
+    },
     /// Show whether ads are flowing right now, and why (killswitch, idle, etc.)
     Status,
     /// First-run setup: create the archive and capture once
@@ -111,6 +122,7 @@ fn main() -> Result<()> {
         Command::Watch { interval, once } => watch::run(interval, once),
         Command::Archive { command } => run_archive(command),
         Command::Export { format, out } => export::run(format, out),
+        Command::Snapshot { width, plain } => snapshot::run(width, plain),
         Command::Status => status::run(),
         Command::Setup => setup::run(),
         Command::Doctor => doctor::run(),
